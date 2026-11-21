@@ -7,6 +7,7 @@ authors:
   - given-names: Woojae
     family-names: Kim
     affiliation: "Department of Chemistry, Yonsei University"
+    orcid: "https://orcid.org/0000-0001-8638-8744"
 version: 1.0.0
 date-released: "2026-11-21"
 license: MIT
