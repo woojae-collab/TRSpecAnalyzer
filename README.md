@@ -100,6 +100,15 @@ measurement.
 `demo/README_demo.txt` gives the steps and the numbers to expect at each
 one, so the program can be checked on your own installation.
 
+## Versions
+
+The version number (major.minor.patch) is shown in the title of the main
+window and returned by `TRSpecAnalyzer.Version`. It is also written into
+saved sessions and Auto Analysis reports. Changes are listed in
+[CHANGELOG.md](CHANGELOG.md), and every version stays available under
+[Releases](https://github.com/woojae-collab/TRSpecAnalyzer/releases).
+When you report results, please state the version you used.
+
 ## 한국어 안내
 
 TRSpecAnalyzer는 시간분해 분광 데이터(TA, TR-PL, TR-Raman, TR-IR)를
