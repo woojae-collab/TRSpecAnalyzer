@@ -1,6 +1,6 @@
 # TRSpecAnalyzer
 
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.24420778.svg)](https://doi.org/10.5281/zenodo.24420778)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.24420777.svg)](https://doi.org/10.5281/zenodo.24420777)
 
 A MATLAB app for analysing time-resolved spectroscopy data: transient
 absorption (fs/ns TA), time-resolved photoluminescence, time-resolved
@@ -127,12 +127,14 @@ reproduces the problem help most.
 
 ## How to cite
 
-If TRSpecAnalyzer was useful for your work, please cite the version you
-used. For v1.0.0:
+If TRSpecAnalyzer was useful for your work, please cite it and state the
+version you used:
 
-> Kim, W. (2026). TRSpecAnalyzer: a MATLAB app for the analysis of
-> time-resolved spectroscopy data (v1.0.0). Zenodo.
-> https://doi.org/10.5281/zenodo.24420778
+> Kim, W. TRSpecAnalyzer: a MATLAB app for the analysis of time-resolved
+> spectroscopy data. Zenodo. https://doi.org/10.5281/zenodo.24420777
+
+This DOI stands for all versions and always resolves to the latest one.
+Every version also has a DOI of its own, listed on the Zenodo page.
 
 ## Author
 

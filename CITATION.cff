@@ -12,6 +12,7 @@ version: 1.0.0
 date-released: "2026-11-21"
 license: MIT
 repository-code: "https://github.com/woojae-collab/TRSpecAnalyzer"
+doi: 10.5281/zenodo.24420777
 keywords:
   - MATLAB
   - time-resolved spectroscopy
