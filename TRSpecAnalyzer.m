@@ -184,7 +184,7 @@ classdef TRSpecAnalyzer < handle
     %   Author: Woojae Kim (written with Claude Code)
     %           ULS Lab, Department of Chemistry, Yonsei University
     %
-    %   Version 1.0.0 (2026-11-21). The number is the constant
+    %   Version 1.0.1 (2026-11-22). The number is the constant
     %   TRSpecAnalyzer.Version (major.minor.patch): it is shown in the
     %   title of the main window and written into saved sessions and
     %   Auto Analysis reports. Changes are listed in CHANGELOG.md.
@@ -198,8 +198,8 @@ classdef TRSpecAnalyzer < handle
         % files or the way the program is used), and its date. Shown in
         % the title of the main window; written into saved sessions
         % (meta.appVersion) and Auto Analysis reports.
-        Version     = '1.0.0';
-        VersionDate = '2026-11-21';
+        Version     = '1.0.1';
+        VersionDate = '2026-11-22';
     end
     
     properties (Access = public)
@@ -7657,7 +7657,10 @@ classdef TRSpecAnalyzer < handle
             app.selWL = val;
             app.edSelWL.Value = val;
             if doUpdate
+                % both small plots: the spectrum carries the marker
+                % line of the selected wavelength
                 app.updateCrosshairs();
+                app.drawSpectrum();
                 app.drawKinetics();
             end
         end
@@ -7669,8 +7672,11 @@ classdef TRSpecAnalyzer < handle
             app.selT = val;
             app.edSelT.Value = val;
             if doUpdate
+                % both small plots: the kinetics carry the marker line
+                % of the selected delay
                 app.updateCrosshairs();
                 app.drawSpectrum();
+                app.drawKinetics();
             end
         end
         
@@ -8470,6 +8476,10 @@ classdef TRSpecAnalyzer < handle
                 app.edZMax.Value =  cl;
             end
             
+            % --- Status text: '[cropped]' or a reported t_0 shift no
+            %     longer apply ---
+            app.updateStatusLabel();
+            
             % --- Clip pinned overlays to the new full range ---
             app.specOverlays = app.specOverlays( ...
                 app.specOverlays >= tLo & app.specOverlays <= tHi);
@@ -9091,6 +9101,9 @@ classdef TRSpecAnalyzer < handle
             end
             
             function onNCompChange()
+                % take over what was typed into the table first:
+                % fillTable() fills from the stored settings
+                if ~isempty(tauTable.Data), readTable(); end
                 app.kfNComp = str2double(ddN.Value);
                 fillTable();
             end
@@ -13333,16 +13346,26 @@ classdef TRSpecAnalyzer < handle
                 h.FaceAlpha = 'flat';
                 
                 hold(ax, 'on');
+                % a dark line under each white one, so that the limits
+                % show on any colormap (also on the white centre of
+                % BWR / RdBu / seismic)
+                dk = [0.25 0.25 0.25];
+                xline(ax, wl1, '-', 'Color', dk, 'LineWidth', 2.6);
+                xline(ax, wl2, '-', 'Color', dk, 'LineWidth', 2.6);
+                yline(ax, t1,  '-', 'Color', dk, 'LineWidth', 2.6);
+                yline(ax, t2,  '-', 'Color', dk, 'LineWidth', 2.6);
                 xline(ax, wl1, 'w-', 'LineWidth', 1.2);
                 xline(ax, wl2, 'w-', 'LineWidth', 1.2);
                 yline(ax, t1,  'w-', 'LineWidth', 1.2);
                 yline(ax, t2,  'w-', 'LineWidth', 1.2);
                 hold(ax, 'off');
                 
-                nWL = nnz(app.originalWavelength >= wl1 & ...
-                          app.originalWavelength <= wl2);
-                nT  = nnz(app.originalDelay >= t1 & ...
-                          app.originalDelay <= t2);
+                % counted on the working data: these are the points
+                % "Apply Crop" keeps
+                nWL = nnz(app.wavelength >= wl1 & ...
+                          app.wavelength <= wl2);
+                nT  = nnz(app.delay >= t1 & ...
+                          app.delay <= t2);
                 title(ax, sprintf(['Kept: %s = [%.1f, %.1f] %s  ' ...
                     '(%d pts)  |  t = [%.3g, %.3g] %s  (%d pts)'], ...
                     app.xSym(), wl1, wl2, app.xUnitAx(), nWL, t1, t2, app.tUnitAx(), nT));
@@ -14525,10 +14548,18 @@ classdef TRSpecAnalyzer < handle
                 tbl.Data = app.chirpPts;
                 
                 if ~isempty(app.chirpPts)
-                    hPts = line(axMap, app.chirpPts(:,1), app.chirpPts(:,2), ...
+                    % white '+' on a dark, slightly wider '+': visible
+                    % on any colormap (hPts holds both)
+                    hPts = [ ...
+                        line(axMap, app.chirpPts(:,1), app.chirpPts(:,2), ...
+                        'LineStyle', 'none', 'Marker', '+', ...
+                        'MarkerSize', 14, 'Color', [0.15 0.15 0.15], ...
+                        'LineWidth', 3.4, ...
+                        'HitTest', 'off', 'PickableParts', 'none'), ...
+                        line(axMap, app.chirpPts(:,1), app.chirpPts(:,2), ...
                         'LineStyle', 'none', 'Marker', '+', ...
                         'MarkerSize', 14, 'Color', 'w', 'LineWidth', 1.8, ...
-                        'HitTest', 'off', 'PickableParts', 'none');
+                        'HitTest', 'off', 'PickableParts', 'none')];
                 end
                 
                 cla(axFit);

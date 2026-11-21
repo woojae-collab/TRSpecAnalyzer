@@ -8,8 +8,8 @@ authors:
     family-names: Kim
     affiliation: "Department of Chemistry, Yonsei University"
     orcid: "https://orcid.org/0000-0001-8638-8744"
-version: 1.0.0
-date-released: "2026-11-21"
+version: 1.0.1
+date-released: "2026-11-22"
 license: MIT
 repository-code: "https://github.com/woojae-collab/TRSpecAnalyzer"
 doi: 10.5281/zenodo.24420777
