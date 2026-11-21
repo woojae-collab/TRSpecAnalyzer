@@ -183,11 +183,25 @@ classdef TRSpecAnalyzer < handle
     %
     %   Author: Woojae Kim (written with Claude Code)
     %           ULS Lab, Department of Chemistry, Yonsei University
-    %   Last updated: 2026-11-21
+    %
+    %   Version 1.0.0 (2026-11-21). The number is the constant
+    %   TRSpecAnalyzer.Version (major.minor.patch): it is shown in the
+    %   title of the main window and written into saved sessions and
+    %   Auto Analysis reports. Changes are listed in CHANGELOG.md.
     %
     %   Requires MATLAB R2020b or later. No additional toolboxes.
     
     % =====================================================================
+    properties (Constant)
+        % Version of the program, major.minor.patch (patch: fixes,
+        % minor: new features, major: changes that break older session
+        % files or the way the program is used), and its date. Shown in
+        % the title of the main window; written into saved sessions
+        % (meta.appVersion) and Auto Analysis reports.
+        Version     = '1.0.0';
+        VersionDate = '2026-11-21';
+    end
+    
     properties (Access = public)
         % ---- Data (current working) ----
         wavelength  = []
@@ -395,7 +409,8 @@ classdef TRSpecAnalyzer < handle
             % control and axes below is created with them.
             app.loadPrefs();
             
-            app.fig = uifigure('Name', 'TR Spectroscopy Analyzer', ...
+            app.fig = uifigure('Name', ...
+                ['TR Spectroscopy Analyzer v' app.Version], ...
                 'Position', [80 60 1400 820], ...
                 'CloseRequestFcn', @(~,~) app.onClose());
             app.applyLightTheme(app.fig);
@@ -6581,7 +6596,8 @@ classdef TRSpecAnalyzer < handle
             if nargin < 4 || isempty(src), src = 'current data'; end
             tu = app.tUnitHdr();  xu = app.xUnitTxt();
             L = {};
-            L{end+1} = 'AUTOMATIC ANALYSIS';
+            L{end+1} = sprintf('AUTOMATIC ANALYSIS   (TRSpecAnalyzer v%s)', ...
+                app.Version);
             L{end+1} = sprintf('Data: %s', src);
             L{end+1} = sprintf('      %d wavelengths (%.4g ... %.4g %s) x %d delays (%.4g ... %.4g %s)', ...
                 numel(P.wlIn), min(P.wlIn), max(P.wlIn), xu, ...
@@ -7879,9 +7895,12 @@ classdef TRSpecAnalyzer < handle
             for k = 1:numel(flds)
                 s.(flds{k}) = app.(flds{k});
             end
+            % meta.version is the layout of the session file,
+            % meta.appVersion the program that wrote it.
             s.meta = struct( ...
                 'app',     'TRSpecAnalyzer', ...
                 'version', 1, ...
+                'appVersion', app.Version, ...
                 'saved',   datestr(now, 'yyyy-mm-dd HH:MM:SS'));  %#ok<TNOW1,DATST>
             
             try
