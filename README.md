@@ -1,5 +1,7 @@
 # TRSpecAnalyzer
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.24420778.svg)](https://doi.org/10.5281/zenodo.24420778)
+
 A MATLAB app for analysing time-resolved spectroscopy data: transient
 absorption (fs/ns TA), time-resolved photoluminescence, time-resolved
 Raman and IR, or any other signal measured as a delay x wavelength matrix.
@@ -122,6 +124,15 @@ TRSpecAnalyzer는 시간분해 분광 데이터(TA, TR-PL, TR-Raman, TR-IR)를
 Questions and bug reports are welcome under *Issues*. For a bug report,
 the text of the error dialog and, if possible, a small data file that
 reproduces the problem help most.
+
+## How to cite
+
+If TRSpecAnalyzer was useful for your work, please cite the version you
+used. For v1.0.0:
+
+> Kim, W. (2026). TRSpecAnalyzer: a MATLAB app for the analysis of
+> time-resolved spectroscopy data (v1.0.0). Zenodo.
+> https://doi.org/10.5281/zenodo.24420778
 
 ## Author
 
