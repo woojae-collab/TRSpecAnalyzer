@@ -325,7 +325,7 @@ end
 
 % ======================================================================
 function y = expIRF(t, k, sig)
-% exp(-k t) for t >= 0, convolved with a normalised Gaussian.
+% exp(-k t) for t >= 0, convolved with a normalized Gaussian.
 y = 0.5 * exp(-k * t + 0.5 * (k * sig) ^ 2) .* ...
     erfc((k * sig ^ 2 - t) / (sig * sqrt(2)));
 y(~isfinite(y)) = 0;

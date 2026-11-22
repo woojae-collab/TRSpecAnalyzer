@@ -130,7 +130,7 @@ TRSpecAnalyzer run in GNU Octave):
 
   Background   mean of the first 43 delays (t <= -0.36 ps)
   Mask         none. 500 ... 502 nm is listed as "noisier than the
-               neighbours, but kept" (noise up to 4.7 times, signal at
+               neighbors, but kept" (noise up to 4.7 times, signal at
                least 26 times the noise)
   Chirp        time zero from -0.27 ps at 450 nm to +0.56 ps at 750 nm
                (within 0.01 ps of the true curve)

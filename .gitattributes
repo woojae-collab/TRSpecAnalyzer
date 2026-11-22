@@ -1,0 +1,4 @@
+# Line endings the start scripts need on their systems:
+# Windows batch files keep their CR LF as they are, macOS files have LF.
+*.bat      -text
+*.command  text eol=lf

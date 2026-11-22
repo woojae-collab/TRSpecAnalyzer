@@ -9,6 +9,12 @@ codegen/
 
 # Sessions and exports written while working (keep your own data out of the repository)
 *_session.mat
+*.trsession
+
+# Python version: installed packages and caches
+python/.venv/
+__pycache__/
+*.pyc
 
 # Operating system
 .DS_Store

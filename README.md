@@ -2,12 +2,15 @@
 
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.24420777.svg)](https://doi.org/10.5281/zenodo.24420777)
 
-A MATLAB app for analysing time-resolved spectroscopy data: transient
+An app for analyzing time-resolved spectroscopy data: transient
 absorption (fs/ns TA), time-resolved photoluminescence, time-resolved
 Raman and IR, or any other signal measured as a delay x wavelength matrix.
 
-Loading, corrections, fitting and decomposition are done in one program,
-which is a single file, `TRSpecAnalyzer.m`.
+Loading, corrections, fitting and decomposition are done in one program.
+It is available in two versions with the same functions:
+
+- **MATLAB**: a single file, `TRSpecAnalyzer.m`
+- **Python**: the folder [`python`](python); it runs without MATLAB
 
 ![Synthetic demo data set with its true spectra and populations](demo/demo_preview.png)
 
@@ -16,10 +19,12 @@ analysis should recover.*
 
 ## Requirements
 
-- MATLAB R2020b or later
-- No additional toolboxes
+- MATLAB version: MATLAB R2020b or later, no additional toolboxes
+- Python version: Python 3.10 or later (3.13 recommended) on Windows or
+  macOS. The install script downloads the packages it needs (numpy, scipy,
+  matplotlib, PySide6)
 
-## Getting started
+## Getting started with the MATLAB version
 
 1. Download `TRSpecAnalyzer.m` (or clone this repository) and put it in a
    folder on the MATLAB path.
@@ -32,6 +37,24 @@ analysis should recover.*
 3. Press `Load...` and open `demo/demo_TA.csv`. Then either follow the
    walkthrough in [`demo/README_demo.txt`](demo/README_demo.txt), or press
    `Auto Analysis...` and `Run` for a first overview.
+
+## Getting started with the Python version
+
+1. Download the file `TRSpecAnalyzer_python_v<version>.zip` attached to the
+   [latest release](https://github.com/woojae-collab/TRSpecAnalyzer/releases/latest)
+   and unpack it. It holds the program and the demo data. (In a clone of
+   this repository the program is in the folder `python` and the demo data
+   in `demo`.)
+2. Install Python 3.13 from [python.org](https://www.python.org/downloads/).
+3. Windows: double-click `install_windows.bat` once, then start the program
+   with `run_windows.bat`. macOS: `install_mac.command` once, then
+   `run_mac.command` (the two macOS files have not been tried on a Mac yet).
+
+[`python/README.txt`](python/README.txt)
+([한국어](python/README_KO.txt)) has the details: updating, the mouse
+actions in the plots, the differences from the MATLAB version, and how the
+two versions were compared. The user manuals below describe the windows of
+both versions.
 
 ## Data format
 
@@ -57,7 +80,8 @@ and averaged.
   masking of wavelength ranges (for example pump scatter)
 - Time unit fs / ps / ns / us; spectral axis in nm or cm-1
 - Sessions: the whole working state, including every result, is saved to
-  and restored from one `.mat` file
+  and restored from one file (`.mat` in the MATLAB version, `.trsession`
+  in the Python version)
 
 **Analysis**
 
@@ -109,7 +133,9 @@ window and returned by `TRSpecAnalyzer.Version`. It is also written into
 saved sessions and Auto Analysis reports. Changes are listed in
 [CHANGELOG.md](CHANGELOG.md), and every version stays available under
 [Releases](https://github.com/woojae-collab/TRSpecAnalyzer/releases).
-When you report results, please state the version you used.
+The Python version carries the number of the MATLAB version whose
+functions it has. When you report results, please state the version you
+used.
 
 ## 한국어 안내
 
@@ -118,6 +144,9 @@ TRSpecAnalyzer는 시간분해 분광 데이터(TA, TR-PL, TR-Raman, TR-IR)를
 도구입니다. `TRSpecAnalyzer.m` 파일 하나만 있으면 되고, MATLAB R2020b
 이상에서 추가 toolbox 없이 실행됩니다. 자세한 사용법은
 [한국어 사용 설명서](docs/TRSpecAnalyzer_User_Manual_KO.pdf)를 보세요.
+
+MATLAB 없이 쓸 수 있는 Python판도 `python` 폴더에 있습니다. 기능은 MATLAB판과
+같고, 설치와 사용법은 [Python판 안내](python/README_KO.txt)에 있습니다.
 
 ## Feedback
 
@@ -130,8 +159,9 @@ reproduces the problem help most.
 If TRSpecAnalyzer was useful for your work, please cite it and state the
 version you used:
 
-> Kim, W. TRSpecAnalyzer: a MATLAB app for the analysis of time-resolved
-> spectroscopy data. Zenodo. https://doi.org/10.5281/zenodo.24420777
+> Kim, W. TRSpecAnalyzer: an app for the analysis of time-resolved
+> spectroscopy data (MATLAB and Python versions). Zenodo.
+> https://doi.org/10.5281/zenodo.24420777
 
 This DOI stands for all versions and always resolves to the latest one.
 Every version also has a DOI of its own, listed on the Zenodo page.

@@ -139,7 +139,7 @@ classdef TRSpecAnalyzer < handle
     %       apodization, zero-padding, detrending, and wavenumber/THz
     %       output. Heatmap z-axis (and 1D y-axis) supports linear/log; a
     %       display nu range zooms the frequency axes and renormalizes
-    %       the colour scale to the visible band
+    %       the color scale to the visible band
     %     - Click+drag inspection on the |FFT|^2 map updates four linked
     %       plots: power spectrum at the clicked lambda; power spectrum
     %       averaged over a user-defined lambda range (dashed bounds on
@@ -152,8 +152,8 @@ classdef TRSpecAnalyzer < handle
     %     - Time-frequency analysis window (opened from Coherence): nu-t
     %       map of the coherence residual at one lambda or a lambda-range
     %       average by STFT (sliding-window FFT) or Morlet CWT (FFT-based,
-    %       no Wavelet Toolbox; peak-response normalisation so equal-
-    %       amplitude modes have equal power, centre-frequency scale
+    %       no Wavelet Toolbox; peak-response normalization so equal-
+    %       amplitude modes have equal power, center-frequency scale
     %       mapping so peaks sit at the true nu). Shows the cone of
     %       influence, power-vs-time at a chosen nu (dephasing), the
     %       instantaneous spectrum at a chosen t, and the input trace with
@@ -179,12 +179,14 @@ classdef TRSpecAnalyzer < handle
     %       the number of components can be overruled: every number that
     %       was fitted can be picked ("Components used"). The data are
     %       changed only by "Apply corrections"; the model in use can be
-    %       sent to Global Analysis
+    %       sent to Global Analysis. The last run is kept, like the
+    %       results of the other analysis windows: it is shown again
+    %       when the window is reopened and stored in a saved session
     %
     %   Author: Woojae Kim (written with Claude Code)
     %           ULS Lab, Department of Chemistry, Yonsei University
     %
-    %   Version 1.0.1 (2026-11-22). The number is the constant
+    %   Version 1.0.2 (2026-11-22). The number is the constant
     %   TRSpecAnalyzer.Version (major.minor.patch): it is shown in the
     %   title of the main window and written into saved sessions and
     %   Auto Analysis reports. Changes are listed in CHANGELOG.md.
@@ -198,7 +200,7 @@ classdef TRSpecAnalyzer < handle
         % files or the way the program is used), and its date. Shown in
         % the title of the main window; written into saved sessions
         % (meta.appVersion) and Auto Analysis reports.
-        Version     = '1.0.1';
+        Version     = '1.0.2';
         VersionDate = '2026-11-22';
     end
     
@@ -368,6 +370,7 @@ classdef TRSpecAnalyzer < handle
         tfSaved  = []      % time-frequency (STFT / CWT) analysis
         tgSaved  = []      % target analysis: last result
         tgSet    = []      % target analysis: scheme and fit settings
+        autoSaved = []     % automatic analysis: last run and its options
         
         % Persistent app preferences (stored in prefdir, survive restarts)
         prefLastDir = ''   % last folder used in a file dialog
@@ -727,7 +730,14 @@ classdef TRSpecAnalyzer < handle
             for k = 1:numel(app.ax2D)
                 ax = app.ax2D(k);
                 ax.Color = [0.93 0.93 0.93];
-                xlabel(ax, app.xAxLabel());
+                if k == numel(app.ax2D)
+                    xlabel(ax, app.xAxLabel());
+                else
+                    % upper panel of the split map: the spectral axis is
+                    % labeled once, under the lower panel (as when data
+                    % are shown)
+                    ax.XTickLabel = [];
+                end
                 ylabel(ax, sprintf('Delay time (%s)', app.tUnitAx()));
             end
         end
@@ -1338,7 +1348,7 @@ classdef TRSpecAnalyzer < handle
         
         function B = caBasis(~, t, t0, fwhm, order)
             %caBasis  Time profiles of the coherent-artifact terms: a
-            %   Gaussian of the given FWHM centred at t0 and its first and
+            %   Gaussian of the given FWHM centered at t0 and its first and
             %   second derivative with respect to time, each scaled to a
             %   size of order 1 (numel(t) x order).
             %   A signal that exists only while pump and probe overlap
@@ -1428,7 +1438,7 @@ classdef TRSpecAnalyzer < handle
             % 2 repeated, first result kept. info.fwhmAtLimit: the
             % returned FWHM is not resolved (irfUnresolved).
             %
-            % Backwards compatibility: if betaInit/stretchOn are not given
+            % Backward compatibility: if betaInit/stretchOn are not given
             % (or stretchOn is all-false), behavior matches the previous
             % standard-exp-only fit exactly.
             if nargin < 11 || isempty(betaInit)
@@ -1511,7 +1521,7 @@ classdef TRSpecAnalyzer < handle
             if caFree,     x0 = [x0; log(caW)];       end
             
             % Delay mask of the fit (the user's fit range), fixed for
-            % the whole optimisation.
+            % the whole optimization.
             fitMask = tSel;
             if ~any(fitMask)
                 error(['No delay points left to fit (check the fit ' ...
@@ -2550,7 +2560,7 @@ classdef TRSpecAnalyzer < handle
                 error('The scheme has no compartments. Example:  A -> B');
             end
 
-            % ---- name the parameters of unlabelled steps: k1, k2, ... ----
+            % ---- name the parameters of unlabeled steps: k1, k2, ... ----
             nxt = 1;
             for pp = 1:numel(params)
                 if params{pp}(1) ~= '#', continue; end
@@ -3157,9 +3167,9 @@ classdef TRSpecAnalyzer < handle
             nCol = colBase;
 
             % A label that hangs below a line next to a box (the returning
-            % step of a pair, or a line that runs downwards) keeps the
+            % step of a pair, or a line that runs downward) keeps the
             % label of a loss on the other side of that box; with both
-            % sides taken, the loss is labelled under the sink name.
+            % sides taken, the loss is labeled under the sink name.
             sideR = false(1, nS);  sideL = false(1, nS);
             for k = 1:nE
                 yr = [ysp(E(k).lo), E(k).dum, ysp(E(k).hi)];
@@ -3183,7 +3193,7 @@ classdef TRSpecAnalyzer < handle
                 if ~isempty(sinkOf{q}), sLab{q} = [lab{sinkOf{q}}]; end
             end
             anySink = any(~cellfun(@isempty, sinkOf));
-            under   = false(1, nS);          % loss labelled under the sink name
+            under   = false(1, nS);          % loss labeled under the sink name
             for q = 1:nS
                 under(q) = ~isempty(sinkOf{q}) && sideR(q) && sideL(q);
             end
@@ -3317,7 +3327,7 @@ classdef TRSpecAnalyzer < handle
                     Q(end, :) = tip - 0.6 * ah * uv;
                     D.line(end+1) = struct('x', Q(:, 1).', 'y', Q(:, 2).');
 
-                    % Label, centred at C: above a level line (below it
+                    % Label, centered at C: above a level line (below it
                     % for the returning step of a pair). Next to a
                     % slanted line it stands on the outer side of the
                     % fan the line belongs to, clear of the line. At the
@@ -3579,7 +3589,7 @@ classdef TRSpecAnalyzer < handle
             %   parseTargetScheme / targetConc). Variable projection, as
             %   in fitGlobalAnalysis: the nonlinear parameters (the time
             %   constant 1/k of every rate parameter, t0, FWHM) are
-            %   optimised with fminsearch and the spectra are solved by
+            %   optimized with fminsearch and the spectra are solved by
             %   linear least squares at every step, subject to the
             %   spectral constraints of the scheme (zero ranges, equal /
             %   proportional spectra, non-negativity).
@@ -4713,7 +4723,7 @@ classdef TRSpecAnalyzer < handle
             %     Ptf  : Nfreq x Ntc power map (|X|^2)
             %     freq : 1 x Nfreq frequency axis (freqUnit)
             %     tc   : 1 x Ntc time axis of the map (timeUnit)
-            %     info : struct -- tUni, yu (the analysed trace on the
+            %     info : struct -- tUni, yu (the analyzed trace on the
             %            uniform grid), dtUni, method parameters, and a
             %            cone-of-influence descriptor:
             %              .coiFreq : 1 x Ntc, lowest reliable frequency
@@ -4796,7 +4806,7 @@ classdef TRSpecAnalyzer < handle
                     end
                     nWin = round(winLen / dtUni);
                     nWin = max(8, min(nWin, Nt));
-                    if mod(nWin, 2) == 0, nWin = nWin - 1; end   % odd -> centred
+                    if mod(nWin, 2) == 0, nWin = nWin - 1; end   % odd -> centered
                     halfW = (nWin - 1) / 2;
                     hop = options.hop;
                     if ~isfinite(hop) || hop <= 0, hopN = 1;
@@ -4855,20 +4865,20 @@ classdef TRSpecAnalyzer < handle
                     if fLo >= fHi, fLo = fHi / 50; end
                     freq  = linspace(fLo, fHi, nF);
                     fTU   = freq / fConv;                 % cycles / timeUnit
-                    % Scale <-> frequency via the Morlet CENTRE frequency
+                    % Scale <-> frequency via the Morlet CENTER frequency
                     % f_c = om0 / (2*pi*s). (The Fourier-period relation
                     % used in geophysics biases peak positions by ~1% for
-                    % om0 = 6; the centre-frequency mapping puts a pure
+                    % om0 = 6; the center-frequency mapping puts a pure
                     % sinusoid's response maximum exactly at its f.)
                     sVec  = om0 ./ (2*pi*fTU);              % scales
                     
                     % FFT of the (zero-padded) trace; analytic Morlet in the
-                    % frequency domain. PEAK-RESPONSE normalisation: the
+                    % frequency domain. PEAK-RESPONSE normalization: the
                     % wavelet is scaled so a unit-amplitude cosine at its
-                    % centre frequency gives |W| = 1 at every scale, i.e.
+                    % center frequency gives |W| = 1 at every scale, i.e.
                     % equal-amplitude modes have equal power, exactly as
                     % on the |FFT|^2 map (unlike the Torrence & Compo
-                    % energy normalisation, where power grows as 1/f).
+                    % energy normalization, where power grows as 1/f).
                     Npad  = 2^nextpow2(2 * Nt);
                     Yhat  = fft(yu, Npad);
                     omega = 2*pi * (0:Npad-1) / (Npad * dtUni);
@@ -4901,7 +4911,7 @@ classdef TRSpecAnalyzer < handle
                     error('Unknown time-frequency method "%s".', options.method);
             end
 
-            % --- Normalisation ---
+            % --- Normalization ---
             if strcmpi(options.normMode, 'peak')
                 pk = max(Ptf(:), [], 'omitnan');
                 if isfinite(pk) && pk > 0, Ptf = Ptf / pk; end
@@ -5264,7 +5274,7 @@ classdef TRSpecAnalyzer < handle
                 'maxComp',   5, ...     % largest number of time constants tried
                 'minGain',   0.05, ...  % a further component must lower the RMS by this fraction
                 'zOnset',    4, ...     % departure from the baseline, in noise levels
-                'maskK',     3, ...     % noise excess over the neighbouring channels
+                'maskK',     3, ...     % noise excess over the neighboring channels
                 'maskSN',    10, ...    % ... masked only if the signal is below this many
                 ...                     %   noise levels (Inf: every noisy channel)
                 'maskSevere', 10, ...   % ... or the noise excess is above this
@@ -5323,7 +5333,7 @@ classdef TRSpecAnalyzer < handle
         function sg = autoNoise(~, D, t)
             %autoNoise  Noise level of every wavelength (row of D).
             %   Each point is compared with the straight line through its
-            %   two neighbours on the delay axis. For a smooth signal the
+            %   two neighbors on the delay axis. For a smooth signal the
             %   difference is noise only, and its median absolute
             %   deviation ignores the few points at the signal rise.
             %   Valid on a non-uniform delay axis.
@@ -5395,17 +5405,17 @@ classdef TRSpecAnalyzer < handle
             %autoRidge  Time of the steepest change of every wavelength
             %   between delays jA and jB: the "max |dA/dt|" ridge of the
             %   chirp window, with the slope taken over w delay steps
-            %   (w = 1: neighbouring delays).
+            %   (w = 1: neighboring delays).
             %   A plain rise has one slope peak; its position is refined
             %   between the grid points (parabola through the three
-            %   largest slopes, or the centre of gravity of the part
+            %   largest slopes, or the center of gravity of the part
             %   above half height when the peak is wide).
             %   A coherent artifact (a Gaussian, or one of its
             %   derivatives, around time zero) has several slope peaks,
-            %   symmetric about its centre, and the largest slope alone
+            %   symmetric about its center, and the largest slope alone
             %   would sit on one of its flanks. When further slopes of
             %   30 % of the largest, and clear of the noise, are found
-            %   within three peak widths, the position is the centre of
+            %   within three peak widths, the position is the center of
             %   gravity of the squared slope over all of them.
             %   zj   size of the step at the steepest point, in noise levels
             %   wid  width (FWHM) of the instrument response read from it
@@ -5529,7 +5539,7 @@ classdef TRSpecAnalyzer < handle
             
             % ---------- channels with excess noise ----------
             % Size of the signal of every channel: its largest departure
-            % from the baseline (median of three neighbouring delays, so
+            % from the baseline (median of three neighboring delays, so
             % that one outlier does not count), in units of its noise.
             b0 = R.b;  b0(~isfinite(b0)) = 0;
             Xa = abs(D - b0 * ones(1, N));
@@ -5551,15 +5561,15 @@ classdef TRSpecAnalyzer < handle
                 noisy = rowOK & ratio > opt.maskK;
                 % A noisy channel is dropped only when the noise is
                 % severe: the signal does not stand clear of it, or it
-                % is far above the neighbours. A channel that is merely
-                % noisier than its neighbours but shows a strong signal
+                % is far above the neighbors. A channel that is merely
+                % noisier than its neighbors but shows a strong signal
                 % (probe edge, pump region with a large bleach) is kept.
                 % opt.maskSN = Inf drops every noisy channel.
                 sev  = snr < opt.maskSN | ratio > opt.maskSevere;
                 sevW = snr < opt.maskSN | ratio > opt.maskSevere / 2;
                 flag = noisy & sev;
                 if any(flag)
-                    % Extend every flagged run over the neighbours that
+                    % Extend every flagged run over the neighbors that
                     % are still clearly noisier than normal (half the
                     % threshold, at least 1.5 times) and meet the same
                     % condition, plus one channel.
@@ -5679,7 +5689,7 @@ classdef TRSpecAnalyzer < handle
                 end
                 % A time zero inside the data shows as a rise after a flat
                 % start, or -- with fewer than 3 delays before it -- as a
-                % jump between neighbouring delays.
+                % jump between neighboring delays.
                 if nnz(good) < max(5, ceil(0.05 * nnz(vr))) || ...
                         (nBg < 3 && ch.wStep > 1)
                     hasT0 = false;
@@ -5708,7 +5718,7 @@ classdef TRSpecAnalyzer < handle
                     cosv = (bw.' * dw) / max(nb * norm(dw), realmin);
                     if bSig > 3 && norm(ew) < 0.5 * nb && cosv < -0.8
                         % The first delays hold more signal than the last
-                        % ones and the data move away from them towards
+                        % ones and the data move away from them toward
                         % zero: a decaying signal, not a background.
                         bgStatus = 'signal';
                     elseif bSig < 2
@@ -5908,12 +5918,12 @@ classdef TRSpecAnalyzer < handle
             end
             if strcmp(maskStatus, 'toomany')
                 checks{end+1} = ['More than a quarter of the channels are much ' ...
-                    'noisier than their neighbours: no mask was set. Look at ' ...
+                    'noisier than their neighbors: no mask was set. Look at ' ...
                     'the noise plot.'];
             end
             if ~isempty(keptReg)
                 checks{end+1} = ['Some channels are noisier than their ' ...
-                    'neighbours but were kept, because their signal is far ' ...
+                    'neighbors but were kept, because their signal is far ' ...
                     'above that noise (listed under Mask). The fits are not ' ...
                     'weighted, so such channels count more than quiet ones. ' ...
                     'If the residual shows stripes there, mask them: Mask ' ...
@@ -6641,13 +6651,13 @@ classdef TRSpecAnalyzer < handle
                     for q = 1:size(P.maskReg, 1)
                         if isfinite(P.opt.maskSN)
                             L{end+1} = sprintf(['  Mask         %.4g ... %.4g %s ' ...
-                                '(noise up to %.1f times the neighbours, signal ' ...
+                                '(noise up to %.1f times the neighbors, signal ' ...
                                 'down to %.0f times the noise)'], ...
                                 P.maskReg(q, 1), P.maskReg(q, 2), xu, ...
                                 P.maskReg(q, 3), P.maskReg(q, 4)); %#ok<AGROW>
                         else
                             L{end+1} = sprintf(['  Mask         %.4g ... %.4g %s ' ...
-                                '(noise up to %.1f times the neighbours)'], ...
+                                '(noise up to %.1f times the neighbors)'], ...
                                 P.maskReg(q, 1), P.maskReg(q, 2), xu, ...
                                 P.maskReg(q, 3)); %#ok<AGROW>
                         end
@@ -6655,7 +6665,7 @@ classdef TRSpecAnalyzer < handle
                 case 'none'
                     if isempty(P.keptReg)
                         L{end+1} = sprintf(['  Mask         none: no channel is more ' ...
-                            'than %.3g times noisier than its neighbours'], ...
+                            'than %.3g times noisier than its neighbors'], ...
                             P.opt.maskK);
                     else
                         L{end+1} = ['  Mask         none: the noisy channels show a ' ...
@@ -6667,7 +6677,7 @@ classdef TRSpecAnalyzer < handle
                     L{end+1} = '  Mask         switched off';
             end
             if ~isempty(P.keptReg)
-                L{end+1} = '               noisier than the neighbours, but kept:';
+                L{end+1} = '               noisier than the neighbors, but kept:';
                 nK = size(P.keptReg, 1);
                 for q = 1:min(nK, 6)
                     L{end+1} = sprintf(['                 %.4g ... %.4g %s  (noise up to ' ...
@@ -6931,11 +6941,11 @@ classdef TRSpecAnalyzer < handle
                             O.pkF(q), O.pkRatio(q), wtxt); %#ok<AGROW>
                     end
                 case 'short'
-                    L{end+1} = '  Not analysed: fewer than 32 evenly spaced delays after time zero.';
+                    L{end+1} = '  Not analyzed: fewer than 32 evenly spaced delays after time zero.';
                 case 'skipped'
-                    L{end+1} = sprintf('  Not analysed: %s.', O.msg);
+                    L{end+1} = sprintf('  Not analyzed: %s.', O.msg);
                 otherwise
-                    L{end+1} = sprintf('  Not analysed: %s', O.msg);
+                    L{end+1} = sprintf('  Not analyzed: %s', O.msg);
             end
 
             % ---------- things to check ----------
@@ -7176,7 +7186,7 @@ classdef TRSpecAnalyzer < handle
             app.closeChildWindows();
             % Results depend on the unit: coherence / time-frequency
             % wavenumbers are derived from it, and stored report text
-            % quotes it. Drop them rather than restore them mislabelled.
+            % quotes it. Drop them rather than restore them mislabeled.
             app.invalidateChildResults();
             app.refreshTimeUnitLabels();
             app.updateAll();
@@ -7188,7 +7198,7 @@ classdef TRSpecAnalyzer < handle
             app.specUnit = newUnit;
             % Child windows bake the unit into their labels, titles and
             % table headers when they open; close them so they come back
-            % relabelled. Same policy as the time-unit switch.
+            % relabeled. Same policy as the time-unit switch.
             app.closeChildWindows();
             app.invalidateChildResults();   % stored labels quote the unit
             app.refreshSpecUnitLabels();
@@ -7881,7 +7891,7 @@ classdef TRSpecAnalyzer < handle
                 'gaResultStretchOn', 'gaResultIRF', 'gaResultTRange', ...
                 ... % persisted child-window analysis results
                 'cohSaved', 'ldaSaved', 'mcrSaved', 'svdSaved', ...
-                'kfSaved', 'tfSaved', 'tgSet', 'tgSaved'};
+                'kfSaved', 'tfSaved', 'tgSet', 'tgSaved', 'autoSaved'};
         end
         
         function saveSession(app)
@@ -8022,7 +8032,7 @@ classdef TRSpecAnalyzer < handle
             % on every redraw -- visibly when their position changes,
             % silently (as a leak) when it does not. Delete every child.
             % Then run the regular cla so everything it also does
-            % (resetting the colour-order index, etc.) still happens.
+            % (resetting the color-order index, etc.) still happens.
             if isempty(ax) || ~isvalid(ax), return; end
             try
                 delete(allchild(ax));
@@ -8221,6 +8231,7 @@ classdef TRSpecAnalyzer < handle
             app.kfSaved  = [];
             app.tfSaved  = [];
             app.tgSaved  = [];
+            app.autoSaved = [];
             % tgSet (scheme and starting values) is a setting: kept.
             % svdSaved holds only view settings (N, nShow, scale),
             % which remain sensible across datasets -- keep it.
@@ -10876,7 +10887,7 @@ classdef TRSpecAnalyzer < handle
             onInitChange();
             btnExpC.ButtonPushedFcn   = @(~,~) safeCb(@(~) exportMat( ...
                 [app.delay(:), mcrResult.C], ...
-                ['delay_' app.tUnitHdr(), ...
+                [{['delay_' app.tUnitHdr()]}, ...
                  arrayfun(@(j) sprintf('C%d', j), 1:size(mcrResult.C, 2), ...
                     'UniformOutput', false)], ...
                 'MCR_C', 'Export C profiles'), 'Export C');
@@ -11629,7 +11640,7 @@ classdef TRSpecAnalyzer < handle
             
             function syncNexpEnable()
                 % "Per-pixel N exp" belongs to the per-pixel fit only;
-                % with the GA residual it has no effect, so grey it out.
+                % with the GA residual it has no effect, so gray it out.
                 if strcmp(ddResid.Value, 'pixfit')
                     onOff = 'on';
                 else
@@ -12501,7 +12512,7 @@ classdef TRSpecAnalyzer < handle
             if isempty(lam0) || ~isfinite(lam0), lam0 = app.wavelength(round(end/2)); end
             edLambda = uieditfield(row, 'numeric', 'Value', lam0, ...
                 'Limits', [wlLo0, wlHi0], ...
-                'Tooltip', 'Wavelength whose residual trace is analysed.');
+                'Tooltip', 'Wavelength whose residual trace is analyzed.');
 
             row = uigridlayout(lgl, [1, 4]);
             row.ColumnWidth = {'fit', '1x', 'fit', '1x'};
@@ -12565,7 +12576,7 @@ classdef TRSpecAnalyzer < handle
             row.Padding = [0 0 0 0];  row.ColumnSpacing = 6;
             lblHop = uilabel(row, 'Text', sprintf('STFT hop (%s):', app.tUnitTxt()));
             edHop = uieditfield(row, 'numeric', 'Value', 0, ...
-                'Tooltip', 'Step between window centres. 0 = every sample.');
+                'Tooltip', 'Step between window centers. 0 = every sample.');
             row = uigridlayout(lgl, [1, 2]);
             row.ColumnWidth = {'fit', '1x'};
             row.Padding = [0 0 0 0];  row.ColumnSpacing = 6;
@@ -13347,7 +13358,7 @@ classdef TRSpecAnalyzer < handle
                 
                 hold(ax, 'on');
                 % a dark line under each white one, so that the limits
-                % show on any colormap (also on the white centre of
+                % show on any colormap (also on the white center of
                 % BWR / RdBu / seismic)
                 dk = [0.25 0.25 0.25];
                 xline(ax, wl1, '-', 'Color', dk, 'LineWidth', 2.6);
@@ -15449,7 +15460,7 @@ classdef TRSpecAnalyzer < handle
                 app.gaResultRMS    = info.rms;
                 app.gaResultTauStd = info.tauStd;
                 % Settings this result was obtained with: the table /
-                % dropdown may be edited afterwards without a new fit.
+                % dropdown may be edited afterward without a new fit.
                 app.gaResultStretchOn = app.gaStretchOn;
                 app.gaResultIRF       = app.gaIRFTreat;
                 app.gaResultTRange    = [app.gaFitTMin, app.gaFitTMax];
@@ -18316,7 +18327,7 @@ classdef TRSpecAnalyzer < handle
             function drawDiagram(ax, Wd, Hd, fsMax, hint)
                 % Draw the applied scheme on ax, a canvas of about
                 % Wd x Hd pixels. The geometry is that of
-                % targetDiagramLayout; the boxes take the colours of the
+                % targetDiagramLayout; the boxes take the colors of the
                 % spectra and population curves.
                 if isempty(ax) || ~isvalid(ax), return; end
                 app.claAll(ax);
@@ -18664,6 +18675,9 @@ classdef TRSpecAnalyzer < handle
             %   of the kinetics without a kinetic model, as a report with
             %   the plots it rests on. The working data are changed only
             %   by "Apply corrections to the data".
+            %   The last run is kept in app.autoSaved: a window opened
+            %   again shows it, as long as the data of the main window
+            %   are the ones it describes.
             if isempty(app.deltaA)
                 uialert(app.fig, 'Load data first.', 'No data');
                 return;
@@ -18700,7 +18714,7 @@ classdef TRSpecAnalyzer < handle
             cbMask = uicheckbox(lgl, 'Value', true, ...
                 'Text', 'Mask channels with excess noise', ...
                 'Tooltip', ['Channels whose noise is more than 3 times ' ...
-                    'that of their neighbours (pump scatter, dead pixels, ' ...
+                    'that of their neighbors (pump scatter, dead pixels, ' ...
                     'the ends of the probe spectrum) can be set to NaN and ' ...
                     'left out of every fit. Which of them are dropped is ' ...
                     'set by "Mask rule". Dropped channels at an end of the ' ...
@@ -18717,13 +18731,13 @@ classdef TRSpecAnalyzer < handle
                     'Only where the signal is lost: a noisy channel is ' ...
                     'dropped when its signal is less than 10 times its ' ...
                     'noise, or when its noise is more than 10 times that of ' ...
-                    'the neighbours. Channels that are noisier than their ' ...
-                    'neighbours but show a clear signal stay in the data ' ...
+                    'the neighbors. Channels that are noisier than their ' ...
+                    'neighbors but show a clear signal stay in the data ' ...
                     '(the pump region with a strong bleach, the ends of ' ...
                     'the probe spectrum); the report lists them.' newline ...
                     'Every noisy channel: every channel more than 3 times ' ...
-                    'noisier than its neighbours is dropped, together with ' ...
-                    'the neighbours that are still 1.5 times noisier.']);
+                    'noisier than its neighbors is dropped, together with ' ...
+                    'the neighbors that are still 1.5 times noisier.']);
             cbMask.ValueChangedFcn = @(~,~) set(ddMask, 'Enable', ...
                 app.pick(cbMask.Value, 'on', 'off'));
             cbChirp = uicheckbox(lgl, 'Value', true, ...
@@ -18778,7 +18792,7 @@ classdef TRSpecAnalyzer < handle
             btnRun = uibutton(lgl, 'Text', 'Run', ...
                 'BackgroundColor', [0.20 0.50 0.45], ...
                 'FontColor', 'w', 'FontWeight', 'bold', ...
-                'Tooltip', ['Analyse the data as they are shown in the ' ...
+                'Tooltip', ['Analyze the data as they are shown in the ' ...
                     'main window. Nothing is changed.']);
 
             uilabel(lgl, 'Text', '3. Use the result', 'FontWeight', 'bold');
@@ -18901,8 +18915,13 @@ classdef TRSpecAnalyzer < handle
             L = {};                   % report lines
             sumErr = '';              % message when the summary failed
             applied = false;          % corrections written into the main data
-            srcWl = [];  srcT = [];  srcD = [];   % data the run was made on
+            srcWl = [];  srcT = [];  srcD = [];   % data the result describes:
+                                      % those of the run; after "Apply"
+                                      % the corrected data
             srcDesc = '';             % their name in the report
+            runD = [];                % data given to the run (the plot
+                                      % "before the corrections")
+            runSet = [];              % options of the run
             dlg = [];                 % progress dialog while running
             lineCol = lines(7);
 
@@ -18912,8 +18931,9 @@ classdef TRSpecAnalyzer < handle
             btnGA.ButtonPushedFcn    = @(~,~) safeCb(@doSendGA, 'Send model');
             btnSave.ButtonPushedFcn  = @(~,~) safeCb(@doSave, 'Save report');
             ddN.ValueChangedFcn      = @(~,~) safeCb(@onPickN, 'Components used');
-            edKin.ValueChangedFcn    = @(~,~) safeCb(@drawKinetics, 'Kinetics');
+            edKin.ValueChangedFcn    = @(~,~) safeCb(@onKinEdit, 'Kinetics');
             emptyAxes();
+            restoreState();          % the last run, if there is one
 
             function safeCb(fcn, label)
                 try
@@ -18970,14 +18990,20 @@ classdef TRSpecAnalyzer < handle
                     'maxComp', round(edMax.Value), ...
                     'ca',      ddCA.Value, ...
                     'tryAll',  cbAll.Value);
+                % (the options as they are set in the window: kept with
+                % the result)
+                runSet = opt;
+                runSet.maskRule = ddMask.Value;
                 if strcmp(ddMask.Value, 'all')
                     opt.maskSN = Inf;      % drop every noisy channel
                 end
                 srcWl = app.wavelength(:);
                 srcT  = app.delay(:).';
                 srcD  = app.deltaA;
+                runD  = srcD;
                 P = [];  S = [];  L = {};  sumErr = '';
                 applied = false;
+                app.autoSaved = [];        % a new run replaces the kept one
                 btnApply.Enable = 'off';
                 btnGA.Enable    = 'off';
                 btnSave.Enable  = 'off';
@@ -19028,6 +19054,129 @@ classdef TRSpecAnalyzer < handle
                 else
                     lblStatus.Text = 'Done. No correction was needed.';
                 end
+                keepState();
+            end
+
+            function keepState()
+                % Keep the run in app.autoSaved, so that the window shows
+                % it again after it was closed and a saved session holds
+                % it. Called after every step that changes what the
+                % window shows of a run.
+                if isempty(P), return; end
+                st = struct();
+                st.P = P;
+                st.S = S;
+                st.sumErr  = sumErr;
+                st.applied = applied;
+                st.srcDesc = srcDesc;
+                st.srcWl = srcWl;
+                st.srcT  = srcT;
+                st.srcD  = srcD;
+                st.runD  = runD;
+                st.set   = runSet;
+                st.kin   = edKin.Value;
+                app.autoSaved = st;
+            end
+
+            function restoreState()
+                % Show the kept run again if it still describes the data
+                % of the main window. Every change of those data drops it
+                % (invalidateChildResults); the comparison made here is a
+                % second check.
+                st = app.autoSaved;
+                if isempty(st) || ~isstruct(st) || ~isfield(st, 'P') || ...
+                        isempty(st.P)
+                    return;
+                end
+                try
+                    if ~keptFor(st.srcWl, st.srcT, st.srcD)
+                        app.autoSaved = [];
+                        return;
+                    end
+                    % the options of that run
+                    o = st.set;
+                    cbBg.Value    = logical(o.doBg);
+                    cbMask.Value  = logical(o.doMask);
+                    ddMask.Value  = char(o.maskRule);
+                    ddMask.Enable = app.pick(cbMask.Value, 'on', 'off');
+                    cbChirp.Value = logical(o.doChirp);
+                    cbCrop.Value  = logical(o.doCrop);
+                    edMax.Value   = double(o.maxComp);
+                    ddCA.Value    = char(o.ca);
+                    cbAll.Value   = logical(o.tryAll);
+                    runSet = o;
+                    % the result
+                    P = st.P;  S = st.S;
+                    sumErr  = char(st.sumErr);
+                    applied = logical(st.applied);
+                    srcDesc = char(st.srcDesc);
+                    % (the data as they are now: see keptFor)
+                    srcWl = app.wavelength(:);
+                    srcT  = app.delay(:).';
+                    srcD  = app.deltaA;
+                    runD  = st.runD;
+                    edKin.Value = char(st.kin);
+                    refreshReport();
+                    fillPickN();
+                    drawCorrections();
+                    drawComponents();
+                    drawResidual();
+                    btnApply.Enable = app.pick(P.changed && ~applied, ...
+                        'on', 'off');
+                    btnGA.Enable    = app.pick(~isempty(S), 'on', 'off');
+                    btnSave.Enable  = 'on';
+                    if applied
+                        msg = 'Corrections applied to the main data.';
+                    elseif P.changed
+                        msg = 'Done. The data are unchanged so far.';
+                    else
+                        msg = 'Done. No correction was needed.';
+                    end
+                    lblStatus.Text = sprintf('%s  [restored]', msg);
+                catch
+                    % A kept run that cannot be shown: back to the empty
+                    % window.
+                    app.autoSaved = [];
+                    P = [];  S = [];  L = {};  sumErr = '';
+                    applied = false;
+                    txtRep.Value = {'Press "Run".'};
+                    ddN.Items = {'(run first)'};
+                    ddN.Enable = 'off';
+                    btnApply.Enable = 'off';
+                    btnGA.Enable    = 'off';
+                    btnSave.Enable  = 'off';
+                    emptyAxes();
+                    lblStatus.Text = ['Stored result could not be ' ...
+                        'restored -- run again.'];
+                end
+            end
+
+            function ok = keptFor(wl0, t0, D0)
+                % Are the data of the main window those a kept run
+                % describes? The axes have to agree exactly, the values
+                % within rounding: "Load Session" builds the working data
+                % again from the raw data and the corrections, and
+                % another MATLAB version or computer may do that with a
+                % difference in the last digit.
+                D = app.deltaA;
+                ok = isequal(app.wavelength(:), wl0(:)) && ...
+                     isequal(app.delay(:).', t0(:).') && ...
+                     isequal(size(D), size(D0)) && ...
+                     isequal(isnan(D), isnan(D0));
+                if ~ok, return; end
+                sc = max(abs(D0(:)), [], 'omitnan');
+                dv = max(abs(D(:) - D0(:)), [], 'omitnan');
+                if isempty(sc) || isempty(dv) || isnan(sc) || isnan(dv)
+                    return;              % no numbers to compare
+                end
+                ok = dv <= 1e-9 * sc;
+            end
+
+            function onKinEdit()
+                % Other wavelengths typed into "Kinetics at": they are
+                % kept with the run.
+                drawKinetics();
+                keepState();
             end
 
             function refreshReport()
@@ -19087,6 +19236,7 @@ classdef TRSpecAnalyzer < handle
                     lblStatus.Text = sprintf( ...
                         'In use: %d component(s), set by hand.', n);
                 end
+                keepState();
             end
 
             function nm = fitName()
@@ -19162,6 +19312,9 @@ classdef TRSpecAnalyzer < handle
                 srcD  = app.deltaA;
                 refreshReport();
                 lblStatus.Text = 'Corrections applied to the main data.';
+                % (the data change dropped every kept result, this one
+                % included: keep it again, now for the corrected data)
+                keepState();
                 figure(f);
             end
 
@@ -19247,7 +19400,7 @@ classdef TRSpecAnalyzer < handle
 
             % ============== Plots ==============
             function heat(ax, wlv, tv, Z)
-                % 2D map (wavelength x delay) on a symmetric colour scale.
+                % 2D map (wavelength x delay) on a symmetric color scale.
                 app.claAll(ax);
                 [Wg, Tg] = meshgrid(wlv(:).', tv(:).');
                 Cd = Z.';
@@ -19276,7 +19429,7 @@ classdef TRSpecAnalyzer < handle
                 ch = P.chirp;
                 wlI = P.wlIn;  tI = P.tIn;
                 vr = P.rowOK & ~P.maskRows;
-                Db = srcD - P.bg;
+                Db = runD - P.bg;
 
                 % ---- data near time zero, before and after ----
                 lo = tI(1);  hi = tI(end);  cRaw = NaN;
@@ -19355,7 +19508,7 @@ classdef TRSpecAnalyzer < handle
                 if any(isfinite(thr))
                     hLeg(end+1) = plot(axNz, wlI, thr, '--', ...
                         'Color', [0.5 0.5 0.5], 'DisplayName', ...
-                        sprintf('%.3g x neighbours', P.opt.maskK));
+                        sprintf('%.3g x neighbors', P.opt.maskK));
                 end
                 mk = P.maskRows & P.keepW;
                 if any(mk)
@@ -19715,7 +19868,7 @@ classdef TRSpecAnalyzer < handle
                         case 'short'
                             msg = 'Too few evenly spaced delays';
                         case 'skipped'
-                            msg = 'Oscillations not analysed';
+                            msg = 'Oscillations not analyzed';
                         otherwise
                             msg = 'No oscillation analysis';
                     end
