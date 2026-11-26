@@ -60,6 +60,19 @@ class SingleFileCheck(QtWidgets.QDialog):
         self.cbT.toggled.connect(lambda *_: self.drawPreview())
         row.addWidget(self.cbT)
         row.addWidget(label(fname, italic=True, color=(0.4, 0.4, 0.4)), 1)
+        row.addWidget(label('Signal:', right=True))
+        self.ddSig = QtWidgets.QComboBox()
+        for k in app.SIG_KINDS:
+            self.ddSig.addItem(app.sigShort(k), k)
+        self.ddSig.setCurrentIndex(max(self.ddSig.findData(app.sigLoadKind), 0))
+        self.ddSig.setFixedWidth(120)
+        self.ddSig.setToolTip(tip(
+            'What the numbers in the file are: ΔA or ΔT/T (transient '
+            'absorption, TR-IR) or an intensity (TR-PL, Raman). Decides the '
+            'name on the axes and whether the ΔA <-> ΔT/T conversion is '
+            'offered. Remembered for the next file.'))
+        self.ddSig.currentIndexChanged.connect(lambda *_: self.onSigKind())
+        row.addWidget(self.ddSig)
         v.addLayout(row)
         row = QtWidgets.QHBoxLayout()
         row.setSpacing(8)
@@ -81,6 +94,11 @@ class SingleFileCheck(QtWidgets.QDialog):
 
     def currentOrientation(self):
         return orient(self.wl, self.t, self.A, self.cbT.isChecked())
+
+    def onSigKind(self):
+        self.app.sigLoadKind = self.ddSig.currentData()
+        self.app.savePrefs()
+        self.drawPreview()
 
     def drawPreview(self):
         app = self.app
@@ -115,7 +133,7 @@ class SingleFileCheck(QtWidgets.QDialog):
             h.set_cmap(app.getColormap())
             h.set_clim(-cl, cl)
             cb = self.cv.figure.colorbar(h, cax=self.cax)
-            cb.set_label('ΔA or Intensity', fontsize=FONT_PT)
+            cb.set_label(app.sigNameOf(app.sigLoadKind), fontsize=FONT_PT)
             cb.ax.tick_params(labelsize=FONT_PT, length=3)
             sciTicks(cb.ax, 'y')
         ax.set_xlabel(app.xAxLabel())

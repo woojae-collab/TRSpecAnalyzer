@@ -14,11 +14,9 @@ from .textfit import legend, setTitle
 from .widgets import (FONT_PT, DataTable, NumEdit, PlotCanvas, VScroll,
                       button, colorButton, flowbox, label, lineColor, panel,
                       runBusy, sciTicks, sidePanel, styleAxes, textArea, tip)
-from .win_base import GREEN, Z_LABEL, ChildWindow, MapTriple, absMax
+from .win_base import GREEN, ChildWindow, MapTriple, absMax
 from .win_kinfit import irfLimitNote, undetNote, writeTable
 
-AMP_LABEL = 'Amplitude (ΔA or Intensity)'
-RES_LABEL = 'Residual (ΔA or Intensity)'
 CA_NAMES = ['Gaussian', '1st derivative', '2nd derivative']
 
 
@@ -403,6 +401,9 @@ class GlobalAnalysisWindow(ChildWindow):
     @staticmethod
     def _lay2(cv, a1, a2):
         W, H = cv.sizePt()
+        # (R: about as wide as the blank left of the label of the
+        # y-axis; the room of the color bar of the last map above is
+        # not left free)
         L, R, T, B, gap = 54.0, 16.0, 20.0, 32.0, 56.0
         w = (W - L - R - gap) / 2.0
         cv.place(a1, L, B, w, H - T - B)
@@ -422,15 +423,15 @@ class GlobalAnalysisWindow(ChildWindow):
         app = self.app
         tl = 'Delay time (%s)' % app.tUnitAx()
         for ax, xl, yl, ti in (
-                (self.axDADS, app.xAxLabel(), AMP_LABEL,
+                (self.axDADS, app.xAxLabel(), ('Amplitude (%s)' % self.app.sigName()),
                  'Decay-associated difference spectra'),
                 (self.axDADSnorm, app.xAxLabel(), 'Normalized amplitude',
                  'DADS (peak-normalized)'),
-                (self.axEADS, app.xAxLabel(), AMP_LABEL, ''),
+                (self.axEADS, app.xAxLabel(), ('Amplitude (%s)' % self.app.sigName()), ''),
                 (self.axEADSnorm, app.xAxLabel(), 'Normalized amplitude', ''),
-                (self.axKinFit, tl, Z_LABEL,
+                (self.axKinFit, tl, self.app.sigName(),
                  'Kinetics fit at selected %s' % app.xSym()),
-                (self.axKinRes, tl, RES_LABEL, 'Fit residual'),
+                (self.axKinRes, tl, ('Residual (%s)' % self.app.sigName()), 'Fit residual'),
                 (self.axPop, tl, 'Population',
                  'EADS populations $c_i(t)$')):
             styleAxes(ax, grid=True)
@@ -778,6 +779,9 @@ class GlobalAnalysisWindow(ChildWindow):
                 + undetNote(r.t0_std, 0)))
         if r.fwhm_at_limit:
             L.append('IRF FWHM = %.4g %s  [not resolved]' % (r.fwhm, u))
+        elif getattr(r, 'fwhm_too_wide', False):
+            L.append('IRF FWHM = %.4g %s  [not determined by the data]'
+                     % (r.fwhm, u))
         elif np.isfinite(r.fwhm_std):
             L.append('IRF FWHM = %.4g +/- %.2g %s' % (r.fwhm, r.fwhm_std, u))
         else:
@@ -1029,7 +1033,7 @@ class GlobalAnalysisWindow(ChildWindow):
                 n += 1
         ax.axhline(0, color='k', linestyle=':', linewidth=0.8)
         ax.set_xlabel(app.xAxLabel())
-        ax.set_ylabel(AMP_LABEL)
+        ax.set_ylabel(('Amplitude (%s)' % self.app.sigName()))
         setTitle(ax, 'Decay-associated difference spectra   (RMS = %.3g)'
                  % app.gaResultRMS, 'DADS   (RMS = %.3g)' % app.gaResultRMS,
                  'DADS')
@@ -1061,7 +1065,7 @@ class GlobalAnalysisWindow(ChildWindow):
     def plotEADS(self):
         app = self.app
         wl = app.wavelength
-        for ax, yl in ((self.axEADS, AMP_LABEL),
+        for ax, yl in ((self.axEADS, ('Amplitude (%s)' % self.app.sigName())),
                        (self.axEADSnorm, 'Normalized amplitude')):
             ax.clear()
             styleAxes(ax, grid=True)
@@ -1153,7 +1157,9 @@ class GlobalAnalysisWindow(ChildWindow):
             if fin.size else np.nan
         self.maps.draw(
             app.delay, app.wavelength, [app.deltaA, app.gaResultFit, R],
-            [(-cl, cl), (-cl, cl), (-clr, clr)], [True, False, True],
+            # (every map shows its color bar: data and fit have the same
+            # color range, the residual has its own)
+            [(-cl, cl), (-cl, cl), (-clr, clr)], [True, True, True],
             [(ui_str('Experimental  (click to pick \\lambda)'),
               'Experimental'), 'Global fit',
              ('Residual  (RMS = %.3g)' % resRMS, 'RMS = %.3g' % resRMS)],
@@ -1185,7 +1191,7 @@ class GlobalAnalysisWindow(ChildWindow):
         ax.plot(app.delay, fitRow, 'r-', linewidth=1.6, label='Fit')
         ax.axhline(0, color='k', linestyle=':', linewidth=0.8)
         ax.set_xlabel(tl)
-        ax.set_ylabel(Z_LABEL)
+        ax.set_ylabel(self.app.sigName())
         legend(ax, fontsize=8)
         at = '%s = %.2f %s' % (app.xSym(), wlActual, app.xUnitAx())
         setTitle(ax, 'Kinetics at  %s   (requested %.2f %s)' % (
@@ -1198,7 +1204,7 @@ class GlobalAnalysisWindow(ChildWindow):
                  linewidth=0.9)
         ax2.axhline(0, color='k', linestyle=':', linewidth=0.8)
         ax2.set_xlabel(tl)
-        ax2.set_ylabel(RES_LABEL)
+        ax2.set_ylabel(('Residual (%s)' % self.app.sigName()))
         setTitle(ax2, 'Fit residual at ' + at, 'Fit residual')
         sciTicks(ax2, 'y')
         useLog = self.ddKinScale.currentText() == 'Log' and \

@@ -8,7 +8,7 @@ from PySide6 import QtWidgets
 from .textfit import legend
 from .widgets import (FONT_PT, NumEdit, PlotCanvas, button, colorButton,
                       label, sciTicks, styleAxes)
-from .win_base import GREEN, Z_LABEL, ChildWindow
+from .win_base import GREEN, ChildWindow
 
 
 def meanSpectrum(A, N):
@@ -63,17 +63,18 @@ class BackgroundWindow(ChildWindow):
         ax.clear()
         styleAxes(ax, grid=True)
         cmap = colormaps['viridis'].resampled(max(N, 2))
+        pb = app.pipelineBase()
         for k in range(N):
             c = cmap(k)
-            ax.plot(app.wavelength, app.deltaA_raw[:, k], '-',
+            ax.plot(app.wavelength, pb[:, k], '-',
                     color=(c[0], c[1], c[2], 0.6), linewidth=0.7)
-        bg = meanSpectrum(app.deltaA_raw, N)
+        bg = meanSpectrum(pb, N)
         hMean, = ax.plot(app.wavelength, bg, 'k-', linewidth=2,
                          label='Mean of first %d point(s)' % N)
         ax.axhline(0, color='k', linestyle=':', linewidth=0.8)
         legend(ax, handles=[hMean], fontsize=FONT_PT)
         ax.set_xlabel(app.xAxLabel())
-        ax.set_ylabel(Z_LABEL)
+        ax.set_ylabel(self.app.sigName())
         ax.set_title('Early-time spectra and their mean (background)',
                      fontsize=FONT_PT + 1)
         sciTicks(ax, 'y')
@@ -90,7 +91,7 @@ class BackgroundWindow(ChildWindow):
             return
         self.applyBusy = True
         try:
-            app.bgSpectrum = meanSpectrum(app.deltaA_raw, N)
+            app.bgSpectrum = meanSpectrum(app.pipelineBase(), N)
             app.bgN = N
             app.bgApplied = True
             app.updateAll()

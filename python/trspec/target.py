@@ -12,7 +12,7 @@ from scipy.optimize import nnls
 from ._optim import fminsearch
 from ._util import Result, lstsq_min_norm
 from .kinetics import (ca_basis, ca_options, exp_irf_conv, irf_delay_step,
-                       irf_unresolved, irf_width_lost)
+                       irf_too_wide, irf_unresolved, irf_width_lost)
 from .uncertainty import fit_param_uncertainty
 
 _SINK_NAMES = ('gs', 's0', '0', 'ground')
@@ -833,12 +833,16 @@ def fit_target_analysis(D, wl, t, sch, tau_init, tau_fixed=False, t0_init=0.0,
                  das=sas @ mode_w, n_free=n_free, t_sel=t_sel, reordered=reordered,
                  scheme=sch, ca_order=ca_k, ca_spec=ca_spec, ca_fwhm=ca_w_out,
                  ca_fwhm_std=ca_std, ca_mode=ca['mode'],
-                 fwhm_lo=np.nan, fwhm_at_limit=False, irf_retry=0)
+                 fwhm_lo=np.nan, fwhm_at_limit=False, irf_retry=0,
+                 fwhm_hi=np.nan, fwhm_too_wide=False)
     if not fwhm_fixed and fw_res > 0:
         res.fwhm_lo = fw_res
         res.fwhm_at_limit = irf_unresolved(fwhm_out, fw_res)
+    if not fwhm_fixed:
+        res.fwhm_hi = 0.5 * t_span
+        res.fwhm_too_wide = irf_too_wide(fwhm_out, t_span)
     if (not fwhm_fixed and fw_mode == 'auto' and x0.size
-            and irf_width_lost(fwhm_out, fwhm_std, fw_res)):
+            and irf_width_lost(fwhm_out, fwhm_std, fw_res, t_span)):
         # the direct fit lost the IRF width: IRF fixed first, then all free
         fw_s0 = float(fwhm_init)
         if irf_unresolved(fwhm_init, fw_res):
@@ -856,7 +860,8 @@ def fit_target_analysis(D, wl, t, sch, tau_init, tau_fixed=False, t0_init=0.0,
                                      tau_lo, tau_hi, ca, 'limit')
             it_all = res.iters + s1.iters + s2.iters
             if (s2.rss < res.rss * (1 - 1e-6)
-                    or (res.fwhm_at_limit and s2.rss <= res.rss * (1 + 1e-6))):
+                    or ((res.fwhm_at_limit or res.fwhm_too_wide)
+                        and s2.rss <= res.rss * (1 + 1e-6))):
                 s2.initial_rms = res.initial_rms
                 res = s2
                 res.irf_retry = 1

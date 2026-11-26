@@ -13,9 +13,8 @@ from .textfit import legend, setTitle
 from .widgets import (FONT_PT, DataTable, NumEdit, PlotCanvas, button,
                       colorButton, label, panel, sciTicks, sidePanel,
                       styleAxes, textArea, tip)
-from .win_base import GREEN, Z_LABEL, ChildWindow
+from .win_base import GREEN, ChildWindow
 
-RES_LABEL = 'Residual (ΔA or Intensity)'
 
 
 def adjustVec(v0, N, pad):
@@ -66,6 +65,37 @@ class KineticFitWindow(ChildWindow):
         row.addWidget(button('Use crosshair', self.useCrosshair))
         row.addStretch(1)
         lv.addLayout(row)
+
+        # a band instead of one wavelength
+        row = QtWidgets.QHBoxLayout()
+        row.setSpacing(6)
+        self.cbBand = QtWidgets.QCheckBox('Band, to:')
+        self.cbBand.setChecked(bool(app.kfBandOn))
+        self.cbBand.setToolTip(tip(
+            'Fit the kinetics of a band instead of one wavelength: from '
+            'the value above to the value given here.'))
+        row.addWidget(self.cbBand)
+        self.edB2 = NumEdit(self.bandEndStart(), width=80,
+                            limits=(float(np.min(app.wavelength)),
+                                    float(np.max(app.wavelength))))
+        row.addWidget(self.edB2)
+        self.ddBand = QtWidgets.QComboBox()
+        self.ddBand.addItem('Integral', 'integral')
+        self.ddBand.addItem('Mean', 'mean')
+        self.ddBand.setCurrentIndex(
+            max(self.ddBand.findData(app.kfBandMode), 0))
+        self.ddBand.setToolTip(tip(
+            'Integral: integral of the signal over the spectral axis of '
+            'the band (trapezoid). Mean: mean over the wavelengths of the '
+            'band, in the unit of the signal. On an evenly spaced axis '
+            'both give the same time constants. Wavelengths without data '
+            '(masked) are left out; a delay at which one of the others '
+            'has no value stays empty.'))
+        row.addWidget(self.ddBand)
+        row.addStretch(1)
+        lv.addLayout(row)
+        self.edB2.setEnabled(self.cbBand.isChecked())
+        self.ddBand.setEnabled(self.cbBand.isChecked())
 
         row = QtWidgets.QHBoxLayout()
         row.setSpacing(6)
@@ -203,6 +233,14 @@ class KineticFitWindow(ChildWindow):
             try:
                 self.lastFit = dict(sv['lastFit'])
                 self.edWL.setValue(self.lastFit['wlActual'])
+                fi = self.fitInfo()
+                self.cbBand.setChecked(bool(fi['band']))
+                if fi['band']:
+                    self.edB2.setValue(fi['w2'])
+                    self.ddBand.setCurrentIndex(
+                        max(self.ddBand.findData(fi['mode']), 0))
+                self.edB2.setEnabled(self.cbBand.isChecked())
+                self.ddBand.setEnabled(self.cbBand.isChecked())
                 self.drawWithFit()
                 self.txtResult.setPlainText('\n'.join(sv['lines']))
                 self.lblStatus.setText('%s  [restored]' % sv['status'])
@@ -213,6 +251,10 @@ class KineticFitWindow(ChildWindow):
         self.ddScale.currentTextChanged.connect(
             lambda *_: self.refreshAxesScale(True))
         self.edWL.valueChanged.connect(lambda *_: self.drawTraceOnly())
+        self.cbBand.toggled.connect(lambda *_: self.onBandChange())
+        self.edB2.valueChanged.connect(lambda *_: self.onBandChange())
+        self.ddBand.currentIndexChanged.connect(
+            lambda *_: self.onBandChange())
         self.ddIRF.currentIndexChanged.connect(
             lambda *_: self.onIRFModeChange())
 
@@ -316,6 +358,43 @@ class KineticFitWindow(ChildWindow):
         self.edWL.setValue(self.app.selWL)
         self.drawTraceOnly()
 
+    def bandEndStart(self):
+        """Other end of the band when the window opens: the value used
+        last, or 5 % of the spectral axis beside the wavelength."""
+        app = self.app
+        lo, hi = float(np.min(app.wavelength)), float(np.max(app.wavelength))
+        v = app.kfBandTo
+        if v is not None and np.isfinite(v) and lo <= v <= hi:
+            return float(v)
+        step = 0.05 * (hi - lo)
+        v = app.selWL + step
+        if v > hi:
+            v = app.selWL - step
+        return float(min(max(v, lo), hi))
+
+    def onBandChange(self):
+        app = self.app
+        on = self.cbBand.isChecked()
+        self.edB2.setEnabled(on)
+        self.ddBand.setEnabled(on)
+        app.kfBandOn = bool(on)
+        app.kfBandTo = float(self.edB2.value())
+        app.kfBandMode = self.ddBand.currentData()
+        self.drawTraceOnly()
+
+    def traceNow(self):
+        """(d, info): the trace the controls ask for."""
+        return self.app.kinTrace(self.edWL.value(), self.cbBand.isChecked(),
+                                 self.edB2.value(), self.ddBand.currentData())
+
+    def fitInfo(self):
+        """Description of the trace of the last fit (a result kept by
+        an earlier version has none: one wavelength)."""
+        fi = self.lastFit.get('info')
+        if not isinstance(fi, dict) or 'band' not in fi:
+            fi = self.app.kinTrace(self.lastFit['wlActual'], False)[1]
+        return fi
+
     def refreshAxesScale(self, redraw=False):
         app = self.app
         isLog = self.ddScale.currentText() == 'Log' and \
@@ -337,31 +416,38 @@ class KineticFitWindow(ChildWindow):
         if redraw:
             self.cv.draw_idle()
 
-    def _styleBoth(self):
+    def _styleBoth(self, info):
         app = self.app
         for ax in (self.axTrace, self.axRes):
             styleAxes(ax, grid=True)
             ax.set_xlabel('Delay time (%s)' % app.tUnitAx())
             sciTicks(ax, 'y')
-        self.axTrace.set_ylabel(Z_LABEL)
-        self.axRes.set_ylabel(RES_LABEL)
+        yl = app.kinTraceLabel(info, 'ylabel')
+        self.axTrace.set_ylabel(yl)
+        self.axRes.set_ylabel('Residual (%s)' % yl)
 
     def drawTraceOnly(self):
         app = self.app
         wlReq = self.edWL.value()
-        iw = int(np.argmin(np.abs(app.wavelength - wlReq)))
-        wlActual = app.wavelength[iw]
+        d, info = self.traceNow()
         ax = self.axTrace
         ax.clear()
         self.axRes.clear()
-        ax.plot(app.delay, app.deltaA[iw, :], 'k.', markersize=5.5,
-                label='Data')
+        if not info['err']:
+            ax.plot(app.delay, d, 'k.', markersize=5.5, label='Data')
         ax.axhline(0, color='k', linestyle=':', linewidth=0.8)
-        self._styleBoth()
-        at = '%s = %.2f %s' % (app.xSym(), wlActual, app.xUnitAx())
-        setTitle(ax, 'Trace at %s  (requested %.2f %s)' % (
-            at, wlReq, app.xUnitAx()), 'Trace at ' + at, at)
-        legend(ax, fontsize=FONT_PT)
+        self._styleBoth(info)
+        if info['err']:
+            setTitle(ax, info['err'], 'No trace', 'No trace')
+        elif info['band']:
+            at = app.kinTraceLabel(info, 'at')
+            setTitle(ax, 'Trace of the ' + at, 'Trace of the band', 'Band')
+            legend(ax, fontsize=FONT_PT)
+        else:
+            at = app.kinTraceLabel(info, 'at')
+            setTitle(ax, 'Trace at %s  (requested %.2f %s)' % (
+                at, wlReq, app.xUnitAx()), 'Trace at ' + at, at)
+            legend(ax, fontsize=FONT_PT)
         self.axRes.set_title('Residual (no fit yet)', fontsize=FONT_PT + 1)
         self.refreshAxesScale()
         self.cv.draw_idle()
@@ -378,10 +464,15 @@ class KineticFitWindow(ChildWindow):
         self.axRes.plot(lf['t'], lf['res'], '-', color=(0.45, 0.45, 0.45),
                         linewidth=0.9)
         self.axRes.axhline(0, color='k', linestyle=':', linewidth=0.8)
-        self._styleBoth()
-        at = '%s = %.2f %s' % (app.xSym(), lf['wlActual'], app.xUnitAx())
-        setTitle(ax, 'Fit at %s  (RMS = %.3g)' % (at, lf['rms']),
-                 'Fit at ' + at, at)
+        fi = self.fitInfo()
+        self._styleBoth(fi)
+        at = app.kinTraceLabel(fi, 'at')
+        if fi['band']:
+            setTitle(ax, 'Fit of the %s  (RMS = %.3g)' % (at, lf['rms']),
+                     'Fit of the band  (RMS = %.3g)' % lf['rms'], 'Band')
+        else:
+            setTitle(ax, 'Fit at %s  (RMS = %.3g)' % (at, lf['rms']),
+                     'Fit at ' + at, at)
         legend(ax, fontsize=FONT_PT)
         self.axRes.set_title('Residual (RMS = %.3g)' % lf['rms'],
                              fontsize=FONT_PT + 1)
@@ -410,11 +501,23 @@ class KineticFitWindow(ChildWindow):
         self.edFW.setValue(0.15)
         self.cbFWfix.setChecked(True)
         self.ddIRF.setCurrentIndex(self.ddIRF.findData('numerical'))
+        wasBand = self.cbBand.isChecked()
+        b1 = QtCore.QSignalBlocker(self.cbBand)
+        b2 = QtCore.QSignalBlocker(self.ddBand)
+        self.cbBand.setChecked(False)
+        self.ddBand.setCurrentIndex(self.ddBand.findData('integral'))
+        del b1, b2
+        self.edB2.setEnabled(False)
+        self.ddBand.setEnabled(False)
+        app.kfBandOn = False
+        app.kfBandMode = 'integral'
         app.kfFitTMin = None
         app.kfFitTMax = None
         self.setFitTFull()
         self.fillTable()
         self.onIRFModeChange()
+        if wasBand:
+            self.drawTraceOnly()
         self.lblStatus.setText('Reset to defaults.')
         app.kfSaved = None
 
@@ -447,12 +550,15 @@ class KineticFitWindow(ChildWindow):
         if app.kfFWHM <= 0 and app.kfIRFTreat != 'none':
             self.alert('IRF FWHM must be positive.', 'Invalid input')
             return
-        wlReq = self.edWL.value()
-        iw = int(np.argmin(np.abs(app.wavelength - wlReq)))
-        wlActual = float(app.wavelength[iw])
-        d = app.deltaA[iw, :]
+        d, info = self.traceNow()
+        if info['err']:
+            self.alert(info['err'], 'No data')
+            return
+        wlActual, iw = info['wl'], info['iw']
         if not np.any(np.isfinite(d)):
-            self.alert('Trace at this wavelength is all NaN.', 'No data')
+            self.alert('There is no delay at which every wavelength of the '
+                       'band holds data.' if info['band'] else
+                       'Trace at this wavelength is all NaN.', 'No data')
             return
         self.lblStatus.setText('Fitting...')
         QtWidgets.QApplication.setOverrideCursor(
@@ -475,7 +581,8 @@ class KineticFitWindow(ChildWindow):
             return
         QtWidgets.QApplication.restoreOverrideCursor()
         lf = self.lastFit = {
-            'wlActual': wlActual, 'iw': iw, 'data': np.array(d, float),
+            'wlActual': wlActual, 'iw': iw, 'info': dict(info),
+            'data': np.array(d, float),
             't': app.delay.copy(), 'mask': np.asarray(r.mask, bool),
             'tau': np.asarray(r.tau, float),
             'beta': np.asarray(r.beta, float),
@@ -495,10 +602,7 @@ class KineticFitWindow(ChildWindow):
         app = self.app
         u = app.tUnitTxt()
         tauOut, betaOut = lf['tau'], lf['beta']
-        L = []
-        L.append('%-11s: %.2f %s' % (
-            'Wavenumber' if app.specUnit == 'cm-1' else 'Wavelength',
-            lf['wlActual'], app.xUnitTxt()))
+        L = list(app.kinTraceLabel(self.fitInfo(), 'lines'))
         L.append('Iterations : %d' % r.iters)
         L.append('Final   RMS: %.4g' % r.rms)
         if r.exit_flag <= 0:
@@ -536,6 +640,9 @@ class KineticFitWindow(ChildWindow):
                 + undetNote(r.t0_std, 0)))
         if r.fwhm_at_limit:
             L.append('IRF FWHM = %.4g %s  [not resolved]' % (r.fwhm, u))
+        elif getattr(r, 'fwhm_too_wide', False):
+            L.append('IRF FWHM = %.4g %s  [not determined by the data]'
+                     % (r.fwhm, u))
         elif np.isfinite(r.fwhm_std):
             L.append('IRF FWHM = %.4g +/- %.2g %s' % (r.fwhm, r.fwhm_std, u))
         else:
@@ -555,10 +662,11 @@ class KineticFitWindow(ChildWindow):
         if not len(lf['fitVec']):
             self.alert('Run a fit first.', 'No results')
             return
+        fi = self.fitInfo()
         full = app.putFile(
             'CSV (*.csv);;DAT (tab) (*.dat)',
-            'Export kinetic fit @ %.2f %s' % (lf['wlActual'], app.xUnitTxt()),
-            'kinfit_%.1f%s.csv' % (lf['wlActual'], app.xUnitTxt()),
+            app.kinTraceLabel(fi, 'export'),
+            app.kinTraceLabel(fi, 'file') + '.csv',
             parent=self)
         if not full:
             return
@@ -571,9 +679,7 @@ class KineticFitWindow(ChildWindow):
             uh = app.tUnitHdr()
             with open(paramPath, 'w', encoding='utf-8', newline='\n') as fh:
                 fh.write('Single-trace kinetic fit\n')
-                fh.write('%s: %.4f %s\n' % (
-                    'Wavenumber' if app.specUnit == 'cm-1' else 'Wavelength',
-                    lf['wlActual'], app.xUnitTxt()))
+                fh.write(app.kinTraceLabel(fi, 'param') + '\n')
                 fh.write('RMS       : %.6g\n\n' % lf['rms'])
                 fh.write('Time constants:\n')
                 for i in range(len(lf['tau'])):
@@ -611,8 +717,8 @@ def undetNote(std, k):
 
 def irfLimitNote(app, r):
     """Lines of the result box about a fitted IRF width that the data
-    do not resolve, or that came out of the fit in two steps. Port of
-    irfLimitNote."""
+    do not resolve or that is wider than half the range of the delays,
+    or that came out of the fit in two steps. Port of irfLimitNote."""
     L = []
     if getattr(r, 'fwhm_at_limit', False):
         lim = getattr(r, 'fwhm_lo', np.nan)
@@ -620,6 +726,14 @@ def irfLimitNote(app, r):
         L.append('  delay step at time zero (%.3g %s):' % (lim, app.tUnitTxt()))
         L.append('  the delays do not resolve such a')
         L.append('  width. Fix it at a known value.')
+    if getattr(r, 'fwhm_too_wide', False):
+        lim = getattr(r, 'fwhm_hi', np.nan)
+        # (three digits; a whole number from 100 on)
+        limTxt = '%d' % int(np.floor(lim + 0.5)) if lim >= 100 else '%.3g' % lim
+        L.append('  FWHM is above half the range of the')
+        L.append('  delays (%s %s): the data do not' % (limTxt, app.tUnitTxt()))
+        L.append('  determine the IRF width. Fix it at a')
+        L.append('  known value.')
     if not L and getattr(r, 'irf_retry', 0) == 1:
         L.append('  The direct fit lost the IRF width;')
         L.append('  this is the result of a fit in two')

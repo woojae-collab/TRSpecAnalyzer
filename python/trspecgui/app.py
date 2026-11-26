@@ -3,6 +3,7 @@ that draw and handle it in TRSpecAnalyzer.m; method names follow the
 MATLAB program."""
 import json
 import os
+import warnings
 
 import numpy as np
 from matplotlib.cm import ScalarMappable
@@ -20,7 +21,6 @@ from . import zoom
 from .textfit import legend, setLegendText, setSpan
 from .win_base import ANALYSIS_KEYS, fitSize, openChild
 
-Z_LABEL = 'ΔA or Intensity'
 
 
 class TRSpecAnalyzer(AppState):
@@ -92,8 +92,8 @@ class TRSpecAnalyzer(AppState):
         gl.setVerticalSpacing(6)
         gl.setColumnStretch(0, 2)
         gl.setColumnStretch(1, 1)
-        gl.setRowStretch(3, 1)
         gl.setRowStretch(4, 1)
+        gl.setRowStretch(5, 1)
 
         # ---- row 1: data handling -----------------------------------
         # (the three rows of controls continue on a second line when
@@ -138,9 +138,54 @@ class TRSpecAnalyzer(AppState):
                                     color=(0.3, 0.3, 0.3))
         lay.addFill(self.lblStatus, 160)
 
-        # ---- row 2: analysis windows --------------------------------
+        # ---- row 2: data tools --------------------------------------
+        tbD, lay = flowbox(6)
+        gl.addWidget(tbD, 1, 0, 1, 2)
+        lay.addWidget(button(
+            'Subtract data...', self.openSubtractWindow, width=130,
+            tooltip='Subtract a reference data set measured on the same '
+                    'axes (solvent, substrate) from the data as loaded: '
+                    'data - scale x reference, with an optional shift in '
+                    'time. Done before every other correction.'))
+        lay.addWidget(button(
+            'Anisotropy...', self.openAnisotropyWindow, width=120,
+            tooltip='Load the data measured with perpendicular polarization '
+                    '(the data in this window are the parallel ones) and '
+                    'look at the anisotropy r, the magic-angle signal or '
+                    'either polarization.'))
+        lay.addWidget(label('View:', right=True))
+        self.ddAniView = QtWidgets.QComboBox()
+        for k in self.ANI_VIEWS:
+            self.ddAniView.addItem(self.ANI_VIEW_NAMES[k], k)
+        self.ddAniView.setCurrentIndex(self.ddAniView.findData('r'))
+        self.ddAniView.setEnabled(False)
+        self.ddAniView.setFixedWidth(215)
+        self.ddAniView.setToolTip(tip(
+            'What is shown and analyzed. With perpendicular data '
+            '("Anisotropy..."): one of the two polarizations or a '
+            'combination of them. While the solvent coherence is subtracted '
+            'in the Coherence window ("Solvent coherence...", Apply): the '
+            'data, the data without the oscillating part of the solvent in '
+            'the time window of that analysis, or the data without the '
+            'whole solvent signal at all delays. The analysis windows close '
+            'when the view changes; their setup and results are kept for '
+            'every view and come back with it.'))
+        self.ddAniView.currentIndexChanged.connect(
+            lambda *_: self.onViewChoice(self.ddAniView.currentData()))
+        lay.addWidget(self.ddAniView)
+        lay.addWidget(button(
+            'ΔA <-> ΔT/T...', self.openSignalWindow, width=150,
+            tooltip='Convert transient-absorption data between ΔA and '
+                    'ΔT/T (ΔT/T = 10^(-ΔA) - 1). The converted data become '
+                    'the new starting point, as after a crop; "Reset all" '
+                    'returns to the data as loaded.'))
+        self.lblSignal = label('', color=(0.3, 0.3, 0.3))
+        lay.addWidget(self.lblSignal)
+        lay.addStretch(1)
+
+        # ---- row 3: analysis windows --------------------------------
         tbA, lay = flowbox(6)
-        gl.addWidget(tbA, 1, 0, 1, 2)
+        gl.addWidget(tbA, 2, 0, 1, 2)
         lay.addWidget(colorButton(
             'SVD...', (0.20, 0.45, 0.70), width=110,
             tooltip='Singular Value Decomposition: shows singular-value '
@@ -188,6 +233,15 @@ class TRSpecAnalyzer(AppState):
         b.clicked.connect(lambda *_: self.openCoherenceWindow())
         lay.addWidget(b)
         b = colorButton(
+            'Band position...', (0.45, 0.40, 0.70), width=140,
+            tooltip='Where a band lies at every delay (spectral shift, '
+                    'dynamic Stokes shift): its position by the first '
+                    'moment, by the maximum or by a log-normal fit, and a '
+                    'fit of that position along the delays with a sum of '
+                    'exponentials.')
+        b.clicked.connect(lambda *_: self.openBandPositionWindow())
+        lay.addWidget(b)
+        b = colorButton(
             'Auto Analysis...', (0.20, 0.50, 0.45), width=140,
             tooltip='Automatic analysis: proposes the corrections '
                     '(background, mask, chirp, crop), estimates the number '
@@ -199,9 +253,9 @@ class TRSpecAnalyzer(AppState):
         lay.addWidget(b)
         lay.addStretch(1)
 
-        # ---- row 3: display range, export, session, units -----------
+        # ---- row 4: display range, export, session, units -----------
         tb2, lay = flowbox(5)
-        gl.addWidget(tb2, 2, 0, 1, 2)
+        gl.addWidget(tb2, 3, 0, 1, 2)
         self.lblViewTMin = label(
             'Display t_min (%s):' % self.tUnitTxt(), right=True)
         self.edViewTMin = NumEdit(0, width=80)
@@ -263,7 +317,7 @@ class TRSpecAnalyzer(AppState):
 
         # ---- 2D map --------------------------------------------------
         self.pnl2D = panel(ui_str('2D Map  -  click to select (\\lambda, t)'))
-        gl.addWidget(self.pnl2D, 3, 0, 2, 1)
+        gl.addWidget(self.pnl2D, 4, 0, 2, 1)
         v = QtWidgets.QVBoxLayout(self.pnl2D)
         v.setContentsMargins(5, 8, 5, 5)
         v.setSpacing(3)
@@ -295,7 +349,7 @@ class TRSpecAnalyzer(AppState):
 
         # ---- spectrum ------------------------------------------------
         self.pnlSpec = panel('Spectrum  (at selected delay)')
-        gl.addWidget(self.pnlSpec, 3, 1)
+        gl.addWidget(self.pnlSpec, 4, 1)
         v = QtWidgets.QVBoxLayout(self.pnlSpec)
         v.setContentsMargins(5, 8, 5, 5)
         v.setSpacing(3)
@@ -313,7 +367,7 @@ class TRSpecAnalyzer(AppState):
 
         # ---- kinetics ------------------------------------------------
         self.pnlKin = panel('Kinetics  (at selected wavelength)')
-        gl.addWidget(self.pnlKin, 4, 1)
+        gl.addWidget(self.pnlKin, 5, 1)
         v = QtWidgets.QVBoxLayout(self.pnlKin)
         v.setContentsMargins(5, 8, 5, 5)
         v.setSpacing(3)
@@ -405,7 +459,7 @@ class TRSpecAnalyzer(AppState):
         fig.clear()
         self.axSpec = fig.add_axes([0.15, 0.2, 0.8, 0.7])
         self.axSpec.set_xlabel(self.xAxLabel())
-        self.axSpec.set_ylabel(Z_LABEL)
+        self.axSpec.set_ylabel(self.sigName())
         styleAxes(self.axSpec)
         self.cvSpec.layoutFcn = self._layoutSpec
         self.cvSpec.relayout()
@@ -429,7 +483,7 @@ class TRSpecAnalyzer(AppState):
             ax.set_xlabel(self.tLabel())
             styleAxes(ax)
             if k == 0:
-                ax.set_ylabel(Z_LABEL)
+                ax.set_ylabel(self.sigName())
             else:
                 # right part of the split plot: it shares the ordinate
                 # with the left part (as when data are shown)
@@ -513,6 +567,40 @@ class TRSpecAnalyzer(AppState):
 
     def updateStatusLabel(self):
         self.lblStatus.setText(self.statusText())
+        self.lblSignal.setText(self.signalText())
+        self.updateViewControl()
+
+    def updateSignalLabel(self):
+        self.updateStatusLabel()
+
+    def updateViewControl(self):
+        """"View" of the main window holds the anisotropy views while
+        perpendicular data are loaded, the solvent views while they exist
+        (solvViewsOK; the two never exist together), and is off otherwise.
+        Port of updateViewControl."""
+        dd = self.ddAniView
+        if not self.aniOn and (self.solvData or self.solvViewsOK()):
+            keys, names = self.SOLV_VIEWS, self.SOLV_VIEW_NAMES
+            val, en = self.solvView, True
+        else:
+            keys, names = self.ANI_VIEWS, self.ANI_VIEW_NAMES
+            val, en = self.aniView, bool(self.aniOn)
+        dd.blockSignals(True)
+        if [dd.itemData(i) for i in range(dd.count())] != list(keys):
+            dd.clear()
+            for k in keys:
+                dd.addItem(names[k], k)
+        dd.setCurrentIndex(max(dd.findData(val), 0))
+        dd.blockSignals(False)
+        dd.setEnabled(en)
+
+    def onViewChoice(self, v):
+        """"View" of the main window: a solvent view or an anisotropy
+        view (the control holds one set or the other)."""
+        if v in self.SOLV_VIEWS:
+            self.setSolvView(v)
+        elif v is not None:
+            self.setAniView(v)
 
     def dataChanged(self):
         """The working data changed: the analysis windows are closed
@@ -593,6 +681,16 @@ class TRSpecAnalyzer(AppState):
         self.wavelength = self.originalWavelength.copy()
         self.delay = self.originalDelay.copy()
         self.deltaA_raw = self.originalDeltaA.copy()
+        self.sigKind = self.sigOrigKind
+        self.subApplied = False
+        self.subBaked = False
+        self.baseRebased = False
+        self.solvData = False
+        self.solvView = 'data'
+        self.solvStore = {}
+        self.clearCorrLog()
+        self.updateRefStage()
+        self.updatePerpStage()
         self._clearCorrectionState()
         self._syncControlsToData(self.originalDeltaA)
         self.updateStatusLabel()
@@ -608,6 +706,7 @@ class TRSpecAnalyzer(AppState):
         self.delay = self.delay - delta
         self.tZeroShift += delta
         self.specOverlays = [v - delta for v in self.specOverlays]
+        self.solvDataWin = [float(v) - delta for v in np.ravel(self.solvDataWin)]
         for nm in ('gaFitTMin', 'gaFitTMax', 'kfFitTMin', 'kfFitTMax'):
             if getattr(self, nm) is not None:
                 setattr(self, nm, getattr(self, nm) - delta)
@@ -665,15 +764,265 @@ class TRSpecAnalyzer(AppState):
                        'axis.', 'Invalid range')
             return
         self.dataChanged()
-        cropped = self.deltaA[wlMask, :][:, tMask].copy()
+        src = self.deltaA
+        if self.aniOn and self.aniPar is not None:
+            # anisotropy: the corrected PARALLEL data become the starting
+            # point (with the corrections of an Auto Analysis run being
+            # applied); the perpendicular data follow through the log
+            src = self.aniPar
+            if self.pendingAuto is not None:
+                src = self.pipeOn(src, self.pendingAuto, self.delay)
+        self.logRebase(wlMask, tMask)
+        cropped = src[wlMask, :][:, tMask].copy()
         self.wavelength = self.wavelength[wlMask]
         self.delay = self.delay[tMask]
         self.deltaA = cropped
         self.deltaA_raw = cropped.copy()
+        self.markRebased()
         self._clearCorrectionState()
         self._syncControlsToData(self.deltaA_raw)
         self.updateStatusLabel()
         self.updateAll()
+
+    def applySignalConversion(self, toKind):
+        """Convert the working data to toKind ('dA' | 'dTT'). Like Crop,
+        the conversion takes the data with all corrections made so far
+        as the new starting point: the formula is applied to the data
+        shown, and the flags of the single corrections are cleared
+        ("Reset all" still returns to the data as loaded, in their own
+        kind). Returns the number of values that could not be
+        converted."""
+        if self.deltaA is None or toKind == self.sigKind:
+            return 0
+        src = self.deltaA
+        if self.aniOn and self.aniPar is not None:
+            src = self.aniPar
+        B, nBad = self.convertSignal(src, self.sigKind, toKind,
+                                     self.sigAUnit)
+        self.dataChanged()
+        self.logRebase(np.ones(self.wavelength.size, bool),
+                       np.ones(self.delay.size, bool))
+        self.corrLog.append({'op': 'conv', 'from': self.sigKind,
+                             'to': toKind, 'unit': self.sigAUnit})
+        self.deltaA = B
+        self.deltaA_raw = B.copy()
+        self.sigKind = toKind
+        self.markRebased()
+        self._clearCorrectionState()
+        # color range back to automatic: the numbers changed scale
+        self.mapZMin = None
+        self.mapZMax = None
+        fin = np.abs(B[np.isfinite(B)])
+        cl = float(np.max(fin)) if fin.size else 1.0
+        if cl == 0:
+            cl = 1.0
+        self.edZMin.setValue(-cl)
+        self.edZMax.setValue(cl)
+        self.updateStatusLabel()
+        self.updateAll()
+        return nBad
+
+    def applySubtraction(self, on, scale=1.0, shift=0.0):
+        """Switch the subtraction of the reference on (with these
+        values) or off, and rebuild the working data."""
+        if on and (self.refStage is None or not self.subAllowed()[0]):
+            return
+        if self.solvData:
+            return
+        # The factor of the solvent coherence (Coherence window) was found
+        # on the data as they were. It does not hold for data with
+        # another subtraction.
+        if bool(on) != bool(self.subApplied) or (
+                on and (float(scale) != self.subScale
+                        or float(shift) != self.subShift)):
+            self.solvOn = False
+            self.clearSolvDef()
+        self.subApplied = bool(on)
+        if on:
+            self.subScale = float(scale)
+            self.subShift = float(shift)
+        # a background taken from the first N delays follows the data the
+        # corrections start from
+        if self.bgApplied and self.bgN > 0:
+            from .win_background import meanSpectrum
+            self.bgSpectrum = meanSpectrum(self.pipelineBase(), self.bgN)
+        self.updateAll()
+        self.updateStatusLabel()
+
+    def setSolvView(self, v):
+        """What the working data are while the solvent coherence is
+        subtracted in the Coherence window:
+          'data'  the data with their corrections
+          'osc'   without the oscillating part of the solvent, in the time
+                  window of that analysis (what it takes out of its
+                  residual)
+          'all'   without the whole solvent signal, at all delays
+        (solventInData). Another view is other data, so the analysis
+        windows close. Their setup and results are kept for the view that
+        is left (solvStore) and come back with it, as for the anisotropy
+        views (setAniView). A view without kept results starts with the
+        setup of the view before, and without results. Port of
+        setSolvView."""
+        if v not in self.SOLV_VIEWS or (v != 'data'
+                                        and not self.solvViewsOK()):
+            self.updateStatusLabel()
+            return
+        old = self.solvView
+        if v == old:
+            self.updateStatusLabel()
+            return
+        self.closeAnalysisWindows()
+        self.solvStore[old] = self.takeAnalysisState()
+        self.solvView = v
+        self.solvData = v != 'data'
+        self.recompute()                # (the results are dealt with here)
+        if v in self.solvStore:
+            self.putAnalysisState(self.solvStore.pop(v))
+        else:
+            self.clearLiveResults()
+        # (a color range typed in and the zoom of the plots stay, so that
+        # the views can be compared; an automatic range follows the data
+        # of the view)
+        if self.mapZMin is None or self.mapZMax is None:
+            self.autoZRange()
+        self.updateStatusLabel()
+        self.updateAll()
+
+    def autoZRange(self):
+        """Color range of the map back to automatic (the two fields
+        show the range the map uses)."""
+        self.mapZMin = None
+        self.mapZMax = None
+        if self.deltaA is None:
+            return
+        cMin, cMax = self.computeZLim()
+        self.edZMin.setValue(cMin)
+        self.edZMax.setValue(cMax)
+
+    def _aniRebuild(self, keepStore=False, react=True):
+        """The working data anew from the two polarizations, and the
+        main window after them. keepStore: the change leaves the data of
+        other views alone, so what is kept for them (aniStore) stays.
+        react=False: the caller deals with the analysis results."""
+        self.aniKeepStore = bool(keepStore)
+        try:
+            changed = self.recompute()
+            if changed and react and not self.holdDataChange:
+                self.dataChanged()
+        finally:
+            self.aniKeepStore = False
+        self._aniShow()
+
+    def _aniShow(self):
+        self.autoZRange()
+        self.updateStatusLabel()
+        self.resetPlotViews()
+        self.updateAll()
+
+    def setAniView(self, v):
+        """Choose what the working data are: 'par' | 'perp' | 'magic' |
+        'r'. Another view is other data, so the analysis windows close.
+        Their setup and results are kept for the view that is left
+        (aniStore) and come back with it. A view without kept results
+        starts with the setup of the view before, and without results."""
+        if not self.aniOn or v not in self.ANI_VIEWS:
+            self.updateStatusLabel()
+            return
+        old = self.aniView
+        if v == old:
+            self._aniRebuild()
+            return
+        self.closeAnalysisWindows()
+        self.aniStore[old] = self.takeAnalysisState()
+        self.aniView = v
+        self.recompute()                # (the results are dealt with here)
+        if v in self.aniStore:
+            self.putAnalysisState(self.aniStore.pop(v))
+        else:
+            self.clearLiveResults()
+        self._aniShow()
+
+    def applyAnisotropy(self, G, tailOn, tailT, thr, shift=None):
+        """Set the factor of the perpendicular data (typed, or tail
+        matching in the delays tailT), the threshold below which r is
+        left empty and the time shift of the perpendicular data (None:
+        as it is); rebuild the data. What is kept for the views that are
+        not shown (aniStore) stays where the data of the view stay: a new
+        G or a new time shift leaves the parallel view alone, a new
+        threshold alone every view but r. The view shown is dealt with as
+        after any change of the data."""
+        gOld, thrOld, shOld = self.aniGUsed, self.aniThr, self.aniShift
+        self.aniG = float(G)
+        self.aniTail = bool(tailOn)
+        self.aniTailT = [float(v) for v in np.ravel(tailT)][:2]
+        self.aniThr = float(thr)
+        if shift is not None and np.isfinite(shift):
+            self.aniShift = float(shift)
+        if not self.aniOn:
+            return
+        self._aniRebuild(keepStore=True)
+        def same(a, b):               # (as isequaln: NaN equals NaN)
+            return a == b or (a != a and b != b)
+        if not (same(self.aniGUsed, gOld) and self.aniShift == shOld):
+            self.dropViewResults(('perp', 'magic', 'r'))
+        elif not same(self.aniThr, thrOld):
+            self.dropViewResults(('r',))
+
+    def removeAnisotropy(self):
+        """Back to one data set: the parallel data. What was kept for
+        the view "Parallel" is theirs."""
+        if not self.aniOn and self.perpOrig is None:
+            return
+        keep = None
+        if self.aniOn and self.aniView != 'par':
+            keep = self.aniStore.get('par')
+        self.clearAnisotropy()
+        self.aniKeepStore = True
+        try:
+            if self.recompute() and not self.holdDataChange:
+                self.dataChanged()
+        finally:
+            self.aniKeepStore = False
+        if keep is not None:
+            self.putAnalysisState(keep)
+        self._aniShow()
+
+    def openAnisotropyWindow(self):
+        if self.deltaA_raw is None:
+            self.alert('Load the data measured with parallel polarization '
+                       'first (Load...).', 'No data')
+            return None
+        from .win_aniso import AnisotropyDialog
+        dlg = AnisotropyDialog(self)
+        self.anisoDlg = dlg
+        if self.headless:
+            dlg.show()
+        else:
+            dlg.exec()
+        return dlg
+
+    def openSubtractWindow(self):
+        if self.deltaA_raw is None:
+            self.alert('Load data first.', 'No data')
+            return None
+        from .win_subtract import SubtractDialog
+        dlg = SubtractDialog(self)
+        self.subtractDlg = dlg
+        if self.headless:
+            dlg.show()
+        else:
+            dlg.exec()
+        return dlg
+
+    def openSignalWindow(self):
+        from .win_signal import SignalDialog
+        dlg = SignalDialog(self)
+        self.signalDlg = dlg
+        if self.headless:
+            dlg.show()
+        else:
+            dlg.exec()
+        return dlg
 
     # ==================================================================
     # files: export, session
@@ -710,12 +1059,20 @@ class TRSpecAnalyzer(AppState):
             self.alert('Load data first.', 'No data')
             return
         parts = []
+        if self.subApplied:
+            parts.append('sub')
         if self.bgApplied:
             parts.append('BG%d' % self.bgN)
         if self.chirpApplied:
             parts.append('chirp')
+        if self.solvData:
+            parts.append('solvsig' if self.solvView == 'all' else 'solvcoh')
         if self.isCropped():
             parts.append('cropped')
+        if self.sigKind != self.sigOrigKind:
+            parts.append(self.sigKind)        # 'dTT' or 'dA'
+        if self.aniOn:
+            parts.append(self.aniView)        # 'par' 'perp' 'magic' 'r'
         suffix = '_'.join(parts) if parts else 'raw'
         nameOnly = self.dataStem() or 'data'
         fullpath = self.putFile(
@@ -811,6 +1168,8 @@ class TRSpecAnalyzer(AppState):
             self.updateStatusLabel()
             self.resetPlotViews()
             self.updateAll()
+            # (the G of a tail matching is known only now)
+            self.lblSignal.setText(self.signalText())
         finally:
             self.holdDataChange = False
         self.lblStatus.setText('%s   [session: %s]' % (
@@ -947,7 +1306,7 @@ class TRSpecAnalyzer(AppState):
         cax.set_visible(True)
         sm = ScalarMappable(norm=Normalize(cMin, cMax), cmap=cmap)
         cb = self.cv2D.figure.colorbar(sm, cax=cax)
-        cb.set_label(Z_LABEL, fontsize=FONT_PT)
+        cb.set_label(self.sigName(), fontsize=FONT_PT)
         cb.ax.tick_params(labelsize=FONT_PT, length=3)
         sciTicks(cb.ax, 'y')
         self.cv2D.relayout()
@@ -981,7 +1340,7 @@ class TRSpecAnalyzer(AppState):
         hZ = ax.axhline(0, color='k', linestyle=':', linewidth=0.8)
         hV = ax.axvline(self.selWL, color='k', linewidth=1.0, alpha=0.7)
         ax.set_xlabel(self.xAxLabel())
-        ax.set_ylabel(Z_LABEL)
+        ax.set_ylabel(self.sigName())
         ax.set_xlim(float(np.min(self.wavelength)),
                     float(np.max(self.wavelength)))
         sciTicks(ax, 'y')
@@ -1087,10 +1446,14 @@ class TRSpecAnalyzer(AppState):
             hV.set_visible(bool(np.min(tSub) <= self.selT <= np.max(tSub)))
             ax.set_xlabel(self.tLabel())
             if k == 0:
-                ax.set_ylabel(Z_LABEL)
+                ax.set_ylabel(self.sigName())
             else:
                 ax.tick_params(labelleft=False)
-            ax.set_xscale(scales[k])
+            with warnings.catch_warnings():
+                # (a trace that is empty in this part, as r can be where
+                # the signal is small: no message about the log scale)
+                warnings.simplefilter('ignore', category=UserWarning)
+                ax.set_xscale(scales[k])
             xlo, xhi = self.clipViewToMask(tSub, scales[k])
             ax.set_xlim(xlo, xhi)
             if scales[k] == 'log' and xlo > 0 and xhi > xlo:
@@ -1409,6 +1772,14 @@ class TRSpecAnalyzer(AppState):
         v = p.get('specUnit')
         if v in ('nm', 'cm-1'):
             self.specUnit = v
+        v = p.get('sigLoadKind')
+        if v in self.SIG_KINDS:
+            self.sigLoadKind = v
+            self.sigOrigKind = v              # no data yet
+            self.sigKind = v
+        v = p.get('sigAUnit')
+        if v in ('OD', 'mOD'):
+            self.sigAUnit = v
 
     def savePrefs(self):
         try:
@@ -1420,7 +1791,9 @@ class TRSpecAnalyzer(AppState):
                            'mapColormap': self.mapColormap,
                            'delayScaleMode': self.delayScaleMode,
                            'splitThreshold': self.splitThreshold,
-                           'specUnit': self.specUnit}, fh, indent=1)
+                           'specUnit': self.specUnit,
+                           'sigLoadKind': self.sigLoadKind,
+                           'sigAUnit': self.sigAUnit}, fh, indent=1)
         except Exception:
             pass
 
@@ -1480,6 +1853,11 @@ class TRSpecAnalyzer(AppState):
     def openTimeFrequencyWindow(self):
         from .win_coherence import openTimeFrequency
         return openTimeFrequency(self)
+
+    def openBandPositionWindow(self):
+        if self._needData():
+            from .win_bandpos import BandPositionWindow
+            return openChild(self, BandPositionWindow)
 
     def openAutoWindow(self):
         if self._needData():

@@ -8,7 +8,8 @@ import numpy as np
 from ._optim import fminsearch
 from ._util import Result, lstsq_min_norm, as_row
 from .kinetics import (build_ga_basis_ext, ca_basis, ca_options,
-                       irf_delay_step, irf_unresolved, irf_width_lost)
+                       irf_delay_step, irf_too_wide, irf_unresolved,
+                       irf_width_lost)
 from .uncertainty import fit_param_uncertainty
 
 _PENALTY = 1e30
@@ -287,12 +288,16 @@ def fit_global_analysis(D, t, tau_init, t0_init=0.0, fwhm_init=0.15,
                  stretch_on=stretch_on.copy(), irf_mode=irf_mode,
                  ca_order=ca_k, ca_spec=ca_spec, ca_fwhm=ca_w_out,
                  ca_fwhm_std=ca_std, ca_mode=ca['mode'],
-                 fwhm_lo=np.nan, fwhm_at_limit=False, irf_retry=0)
+                 fwhm_lo=np.nan, fwhm_at_limit=False, irf_retry=0,
+                 fwhm_hi=np.nan, fwhm_too_wide=False)
     if not fwhm_fixed and fw_res > 0:
         res.fwhm_lo = fw_res
         res.fwhm_at_limit = irf_unresolved(fwhm_out, fw_res)
+    if not fwhm_fixed:
+        res.fwhm_hi = 0.5 * t_span
+        res.fwhm_too_wide = irf_too_wide(fwhm_out, t_span)
     if (not fwhm_fixed and fw_mode == 'auto' and x0.size
-            and irf_width_lost(fwhm_out, fwhm_std, fw_res)):
+            and irf_width_lost(fwhm_out, fwhm_std, fw_res, t_span)):
         # the direct fit lost the IRF width: IRF fixed first, then all free
         fw_s0 = float(fwhm_init)
         if irf_unresolved(fwhm_init, fw_res):
@@ -306,7 +311,8 @@ def fit_global_analysis(D, t, tau_init, t0_init=0.0, fwhm_init=0.15,
                                      stretch_on, irf_mode, t_range, ca, 'limit')
             it_all = res.iters + s1.iters + s2.iters
             if (s2.rss < res.rss * (1 - 1e-6)
-                    or (res.fwhm_at_limit and s2.rss <= res.rss * (1 + 1e-6))):
+                    or ((res.fwhm_at_limit or res.fwhm_too_wide)
+                        and s2.rss <= res.rss * (1 + 1e-6))):
                 s2.initial_loss = res.initial_loss
                 s2.initial_rms = res.initial_rms
                 res = s2

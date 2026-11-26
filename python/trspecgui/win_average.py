@@ -11,7 +11,7 @@ from .state import detect_axis_swap, parse_data_file, ui_str, write_data_file
 from .textfit import legend
 from .widgets import (FONT_PT, NumEdit, PlotCanvas, button, colorButton,
                       label, lineColor, sciTicks, styleAxes, tip)
-from .win_base import GREEN, Z_LABEL, ChildWindow, absMax
+from .win_base import GREEN, ChildWindow, absMax
 from .win_filecheck import orient
 
 C_FILE, C_MAX, C_INC, C_SHIFT, C_REF = range(5)
@@ -127,12 +127,24 @@ class LoadAverageWindow(ChildWindow):
             'source files were saved with rows = delay and columns = '
             'wavelength instead of the expected layout.'))
         row.addWidget(self.btnTrans)
+        row.addWidget(label('   Signal:', right=True))
+        self.ddSig = QtWidgets.QComboBox()
+        for k in app.SIG_KINDS:
+            self.ddSig.addItem(app.sigShort(k), k)
+        self.ddSig.setCurrentIndex(max(self.ddSig.findData(app.sigLoadKind), 0))
+        self.ddSig.setFixedWidth(120)
+        self.ddSig.setToolTip(tip(
+            'What the numbers in the files are: ΔA or ΔT/T (transient '
+            'absorption, TR-IR) or an intensity (TR-PL, Raman). Remembered '
+            'for the next files.'))
+        self.ddSig.currentIndexChanged.connect(lambda *_: self.onSigKind())
+        row.addWidget(self.ddSig)
         row.addStretch(1)
         v.addLayout(row)
 
         self.tbl = QtWidgets.QTableWidget(0, 5)
         self.tbl.setHorizontalHeaderLabels(
-            ['File', ui_str('Max |\\DeltaA|'), 'Include',
+            ['File', 'Max |%s|' % app.sigShort(app.sigLoadKind), 'Include',
              'Shift (%s)' % app.tUnitTxt(), 'Ref'])
         hh = self.tbl.horizontalHeader()
         hh.setSectionResizeMode(C_FILE,
@@ -422,6 +434,14 @@ class LoadAverageWindow(ChildWindow):
             return '%s (shift=%+.3g)' % (sid, f['shift'])
         return sid
 
+    def onSigKind(self):
+        app = self.app
+        app.sigLoadKind = self.ddSig.currentData()
+        app.savePrefs()
+        self.tbl.horizontalHeaderItem(1).setText(
+            'Max |%s|' % app.sigShort(app.sigLoadKind))
+        self.drawPreview()
+
     def drawPreview(self):
         app = self.app
         refWL, refT = self.edRefWL.value(), self.edRefT.value()
@@ -446,7 +466,7 @@ class LoadAverageWindow(ChildWindow):
         ax.axhline(0, color='k', linestyle=':', linewidth=0.8)
         ax.axvline(refWL, color='k', linewidth=1.0, alpha=0.7)
         ax.set_xlabel(app.xAxLabel())
-        ax.set_ylabel(Z_LABEL)
+        ax.set_ylabel(self.app.sigNameOf(self.app.sigLoadKind))
         ax.set_xlim(float(np.min(wlAx)), float(np.max(wlAx)))
         ax.set_title('Spectrum at t = %.3g %s' % (refT, app.tUnitAx()),
                      fontsize=FONT_PT + 1)
@@ -471,7 +491,7 @@ class LoadAverageWindow(ChildWindow):
         if not isLog or refT > 0:
             ax.axvline(refT, color='k', linewidth=1.0, alpha=0.7)
         ax.set_xlabel('Delay time (%s)' % app.tUnitAx())
-        ax.set_ylabel(Z_LABEL)
+        ax.set_ylabel(self.app.sigNameOf(self.app.sigLoadKind))
         if isLog:
             ax.set_xscale('log')
             pos = tAx > 0

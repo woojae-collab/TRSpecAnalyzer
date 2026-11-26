@@ -2,14 +2,14 @@ cff-version: 1.2.0
 message: "If you use this software, please cite it as below."
 type: software
 title: "TRSpecAnalyzer: an app for the analysis of time-resolved spectroscopy data (MATLAB and Python versions)"
-abstract: "An app for analyzing time-resolved spectroscopy data (transient absorption, time-resolved photoluminescence, time-resolved Raman and IR): corrections, single-wavelength fits, SVD, global and target analysis, lifetime density analysis, MCR-ALS and coherence analysis. The MATLAB version is a single file; it requires MATLAB R2020b or later and no additional toolboxes. A Python version with the same functions is included; it runs without MATLAB."
+abstract: "An app for analyzing time-resolved spectroscopy data (transient absorption, time-resolved photoluminescence, time-resolved Raman and IR): corrections, subtraction of solvent or substrate data, anisotropy from two polarizations, single-wavelength fits, SVD, global and target analysis, lifetime density analysis, MCR-ALS, coherence analysis and the position of a band along the delays (spectral shifts). The MATLAB version is a single file; it requires MATLAB R2020b or later and no additional toolboxes. A Python version with the same functions is included; it runs without MATLAB."
 authors:
   - given-names: Woojae
     family-names: Kim
     affiliation: "Department of Chemistry, Yonsei University"
     orcid: "https://orcid.org/0000-0001-8638-8744"
-version: 1.0.2
-date-released: "2026-11-22"
+version: 1.1.0
+date-released: "2026-11-26"
 license: MIT
 repository-code: "https://github.com/woojae-collab/TRSpecAnalyzer"
 doi: 10.5281/zenodo.24420777

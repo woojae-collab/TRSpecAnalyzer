@@ -85,11 +85,20 @@ def irf_unresolved(fw, fw_res):
     return bool(fw_res > 0 and fw <= 1.2 * fw_res)
 
 
-def irf_width_lost(fw, fw_std, fw_res):
+def irf_too_wide(fw, t_span):
+    """True when an IRF width is more than half the range of the delays
+    (t_span; 0 = unknown): that is no instrument response. A search that
+    has let a time constant go and widens the IRF instead ends there (at
+    its upper limit, the range of the delays). Port of irfTooWide."""
+    return bool(t_span > 0 and fw > 0.5 * t_span)
+
+
+def irf_width_lost(fw, fw_std, fw_res, t_span=0.0):
     """True when a fitted IRF width carries no information: unresolved,
-    or its uncertainty is not finite or exceeds the value."""
-    return bool(irf_unresolved(fw, fw_res) or not np.isfinite(fw_std)
-                or fw_std > fw)
+    wider than half the range of the delays (irf_too_wide), or its
+    uncertainty is not finite or exceeds the value."""
+    return bool(irf_unresolved(fw, fw_res) or irf_too_wide(fw, t_span)
+                or not np.isfinite(fw_std) or fw_std > fw)
 
 
 def exp_irf_conv(t, tau, t0, fwhm):
@@ -114,7 +123,8 @@ def exp_irf_conv(t, tau, t0, fwhm):
         return c
     if not np.isfinite(tau) or tau <= 0:
         return c
-    thresh = 5 * sigma + sigma ** 2 / tau
+    with np.errstate(over='ignore'):
+        thresh = 5 * sigma + sigma ** 2 / tau
     near = np.abs(dt) <= thresh
     far_pos = dt > thresh
     with np.errstate(over='ignore', invalid='ignore', under='ignore'):

@@ -10,8 +10,9 @@ from .textfit import legend, setTitle
 from .widgets import (BlitManager, NumEdit, PlotCanvas, VScroll, button,
                       colorButton, label, lineColor, panel, runBusy,
                       sciTicks, sidePanel, styleAxes, textArea, tip)
-from .win_base import Z_LABEL, ChildWindow
+from .win_base import ChildWindow
 from .win_kinfit import writeTable
+from .zoom import plainLogY
 
 EPS = float(np.finfo(float).eps)
 RUN_COLOR = (0.85, 0.50, 0.20)
@@ -279,10 +280,10 @@ class McrWindow(ChildWindow):
         self.axC.set_ylabel('Concentration')
         setTitle(self.axC, T_C, 'C profiles')
         self.axS.set_xlabel(app.xAxLabel())
-        self.axS.set_ylabel('Pure spectrum (%s)' % Z_LABEL)
+        self.axS.set_ylabel('Pure spectrum (%s)' % self.app.sigName())
         setTitle(self.axS, T_S)
         self.axRec.set_xlabel('Delay time (%s)' % app.tUnitAx())
-        self.axRec.set_ylabel(Z_LABEL)
+        self.axRec.set_ylabel(self.app.sigName())
         setTitle(self.axRec, T_REC)
         self.axConv.set_xlabel('ALS iteration')
         self.axConv.set_ylabel('LOF (%)')
@@ -437,7 +438,7 @@ class McrWindow(ChildWindow):
             self.xhS = None
             self.blS.setArtists([])
         ax.set_xlabel(app.xAxLabel())
-        ax.set_ylabel('Pure spectrum (%s)' % Z_LABEL)
+        ax.set_ylabel('Pure spectrum (%s)' % self.app.sigName())
         setTitle(ax, T_S)
         ax.set_xlim(float(np.min(wl)), float(np.max(wl)))
         sciTicks(ax, 'y')
@@ -456,6 +457,11 @@ class McrWindow(ChildWindow):
         setTitle(ax, 'Convergence (final LOF = %.3f%%)' % r['lof'],
                  'Final LOF = %.3f%%' % r['lof'])
         ax.set_yscale('log')
+        hp = h[np.isfinite(h) & (h > 0)]
+        if hp.size > 1 and np.max(hp) < 10.0 * np.min(hp):
+            # (LOF that changes by less than a decade, the usual case
+            # after a good start: plain numbers at the ticks)
+            plainLogY(ax)
         self.cvConv.draw_idle()
         self.updateRec()
 
@@ -509,7 +515,7 @@ class McrWindow(ChildWindow):
                 color=(0.5, 0.5, 0.5), linewidth=0.8, label='Residual')
         ax.axhline(0, color='k', linestyle=':', linewidth=0.8)
         ax.set_xlabel('Delay time (%s)' % app.tUnitAx())
-        ax.set_ylabel(Z_LABEL)
+        ax.set_ylabel(self.app.sigName())
         setTitle(ax, 'Reconstruction at %s = %.2f %s' % (
             app.xSym(), wl[iw], app.xUnitAx()))
         self._timeAxis(ax, t)

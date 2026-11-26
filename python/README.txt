@@ -1,10 +1,10 @@
-TRSpecAnalyzer - Python version 1.0.2
+TRSpecAnalyzer - Python version 1.1.0
 =====================================
 
 The Python version of the MATLAB program TRSpecAnalyzer, for the analysis
 of time-resolved spectroscopy data (TA, TR-PL, TR-Raman, TR-IR). It runs
-without MATLAB. Version 1.0.2 has every window of the MATLAB program
-v1.0.2 and calculates in the same way; the version number is that of the
+without MATLAB. Version 1.1.0 has every window of the MATLAB program
+v1.1.0 and calculates in the same way; the version number is that of the
 MATLAB program whose functions it has. The user manual of the MATLAB
 program describes the windows of this version as well.
 
@@ -28,10 +28,18 @@ program describes the windows of this version as well.
   - Corrections: Background Corr, Chirp Corr, Crop, Set t=0, Mask,
     Reset all. Load & Average of several files (with Auto-align).
     Export Corrected Data. Save / Load Session.
-  - Analyses: Fit trace, SVD, Global Analysis (with coherent-artifact
+  - Data tools (second row of buttons): Subtract data (a measurement of
+    the solvent or substrate alone, with scale and time shift typed or
+    estimated), Anisotropy (perpendicular data beside the loaded
+    parallel data; views parallel, perpendicular, magic angle and
+    anisotropy r), conversion dA <-> dT/T. What the numbers of a file
+    are (dA, dT/T or Intensity) is chosen when it is loaded.
+  - Analyses: Fit trace (one wavelength, or the integral or mean of a
+    band), SVD, Global Analysis (with coherent-artifact
     terms, stretched components and the IRF FWHM handling of the MATLAB
     program), Target Analysis, LDA, MCR-ALS, Coherence (with
-    Time-frequency), Auto Analysis.
+    Time-frequency, and with the subtraction of the vibrational
+    coherence of the solvent measured alone), Auto Analysis.
   - The results of the analysis windows are kept when a window is closed
     and are stored in session files. They are discarded when the data of
     the main window change.
@@ -134,6 +142,46 @@ program describes the windows of this version as well.
                                 k3 = 4.99, 15.0, 100.0, 1998 ps,
                                 RMS 0.053
 
+  Two pairs of files for the functions added in 1.1.0 (their steps are
+  in the parts "Solvent demo" and "Anisotropy demo" of README_demo.txt):
+     demo\demo_solution.csv     a solute in cyclohexane, and cyclohexane
+     demo\demo_solvent.csv      alone. Coherence window, "Solvent
+                                coherence...": A = 0.700, time shift
+                                0.0030 ps; the 801 cm-1 line of the
+                                solvent goes, 215 and 590 cm-1 remain.
+                                "View" of the main window then shows
+                                the data without the solvent
+     demo\demo_solution_raw.csv    the same two files as measured
+     demo\demo_solvent_raw.csv     (background, chirp): correct the
+                                solution file, then load the solvent
+                                file in "Solvent coherence..."; it
+                                gets the same corrections. A = 0.699,
+                                time shift 0.0030 ps
+     demo\demo_aniso_par.csv    one sample, two polarizations.
+     demo\demo_aniso_perp.csv   "Anisotropy...", tail matching:
+                                G = 1.15; r = 0.38 and -0.12 at early
+                                delays, decaying with 48 ps
+     demo\demo_aniso_raw_par.csv    the same two files as measured
+     demo\demo_aniso_raw_perp.csv   (background, pump scatter, chirp):
+                                correct the parallel file, then load
+                                the perpendicular one; it gets the same
+                                corrections
+     demo\demo_aniso_raw_perp_late.csv   the perpendicular measurement
+                                once more, its time zero 0.05 ps late.
+                                "Anisotropy...", "Estimate": time shift
+                                -0.050 ps
+
+  Time-resolved emission (load it with Signal = Intensity; part
+  "Solvation demo" of README_demo.txt):
+     demo\demo_solvation.csv    a band that shifts to the red while the
+                                solvent relaxes. Fit trace on the band
+                                420 to 760 nm (Integral, 1 component,
+                                start value 1000): 3987 ps, the
+                                fluorescence lifetime alone.
+                                "Band position...", Log-normal fit,
+                                3 exponentials from 0.2 ps: 0.245,
+                                2.92, 14.8 ps (made with 0.25, 3, 15)
+
 
 4. Updating
 -----------
@@ -197,8 +245,6 @@ program describes the windows of this version as well.
     short, rows of buttons continue on a second line, and panels scroll
     in a low window. The status text at the top right of the main window
     ends in "..." when it is too long; point at it to read all of it.
-  - Coherence window: t_min / t_max, the averaging range and the display
-    range each take one row instead of two.
   - Target Analysis: "Export:" stands in front of its buttons instead of
     above them, and in a low window the scheme box and the parameter
     table get lower, so that the result box keeps its room.
@@ -287,6 +333,138 @@ program describes the windows of this version as well.
 
 10. History
 -----------
+  1.1.0  (2026-11-26)
+     The new functions of the MATLAB program 1.1.0, calculated in
+     the same way (CHANGELOG.md of the repository has the details):
+     - Signal kind: what the numbers of a file are (dA, dT/T or
+       Intensity) is chosen when it is loaded; axes, color bar and
+       export names follow. Conversion dA <-> dT/T by the exact
+       relation (button "dA <-> dT/T...").
+     - "Subtract data...": a reference measured on the same axes
+       (solvent, substrate) is subtracted, data - scale x
+       reference(t - shift); scale and shift typed or estimated by
+       least squares. The reference is loaded as measured: it follows
+       crop and the corrections applied from Auto Analysis.
+     - "Anisotropy...": perpendicular data are loaded beside the
+       (parallel) data and corrected alike; "View" chooses parallel,
+       perpendicular, magic angle or anisotropy r, and the view shown
+       is what the analysis windows work on. G typed or from tail
+       matching; the range proposed for it is the last decade of the
+       delays. Tail matching finds one G for all wavelengths; a third
+       plot of the window shows the G of every single wavelength in
+       the tail range with its uncertainty, as a check (display only).
+       A time zero that differs between the two measurements: "Time
+       shift of the perpendicular data", typed or found by "Estimate"
+       (the shift for which the perpendicular data follow the parallel
+       data best around the rise of the signal, at every wavelength
+       with its own factor and offset; with a standard deviation from
+       the scatter between the wavelengths).
+     - Setup and results of the analysis windows are kept for each
+       view: a change of the view closes the windows, and the results
+       of the view chosen come back with it (also from a session
+       file). Whatever changes the data of a view drops what is kept
+       for it: a correction, crop or Reset all drops everything, a new
+       G or a new time shift of the perpendicular data everything but
+       the view Parallel, a new threshold the view r.
+     - Coherence window, "Solvent coherence...": the vibrational
+       coherence of the solvent, measured alone, is taken out of the
+       residual before the FFT; factor and time shift are estimated on
+       the real and imaginary parts of the Fourier transforms in a band
+       of a solvent mode (after M. Liebel, thesis, Oxford 2014).
+       While it is subtracted there ("Apply"), "View" of the main window
+       offers the data without the solvent: "Solvent coherence
+       subtracted" (its oscillating part, in the time window of the
+       analysis) or "Solvent signal subtracted" (the whole solvent
+       signal at all delays, with the factor and the shift found
+       here). The 2D map, the export and every analysis use the view
+       shown. The analysis windows close when the view changes; their
+       setup and results are kept for each view and come back with it.
+     - Coherence window, before and after: with a solvent subtraction
+       the window keeps the result from before it as well. A bar above
+       the plots chooses which map is shown, the curve plots carry the
+       curve from before in gray, and "Side by side..." opens a window
+       with the two maps on one color scale. The exports write what
+       the plots show.
+     - Coherence window, "Color range": the color range (z scale) of
+       the |FFT|^2 map can be typed, for instance a small maximum to
+       bring out weak modes; "Auto" returns to the automatic range.
+     - Fit trace: a band of wavelengths can be fitted instead of one
+       wavelength ("Band, to:"), as its integral over the spectral axis
+       or as its mean. In the view Anisotropy r, r is calculated from
+       the band values of the two polarizations.
+     - "Band position..." (new window): where a band lies at every
+       delay, for a spectral shift such as a dynamic Stokes shift. The
+       position is taken as the first moment, as the maximum of a
+       parabola through the top, or as the maximum of a fitted
+       log-normal band (chosen in the window), in cm-1 or nm; an
+       intensity per nm is converted to one per cm-1. The position
+       along the delays is fitted with 1 to 4 exponentials and a
+       constant; the window shows the band with its model, the
+       position with the fit, C(t) and the width, and exports them.
+     - Interpolation along the delays: the chirp correction and the
+       time shifts ("Subtract data...", perpendicular data) take the
+       values between the delays from a cubic spline inside every
+       stretch of equally spaced delays and from linear interpolation
+       elsewhere. Up to 1.0.2 the chirp correction was linear
+       everywhere, which damped fast oscillations (8 delays in a
+       period: 9 % of the power on average, 0 to 14 % depending on
+       the wavelength). Chirp-corrected data therefore differ
+       slightly from those of 1.0.2. For scripts: trspec.chirp has
+       delay_runs, spline_curv, interp_runs and chirp_shift.
+     - Details of these functions: tail
+       matching finds G by orthogonal regression (noise in both data
+       sets is allowed for); in the view Anisotropy r the automatic
+       color range of the map is at most -0.5 ... 0.5; a subtraction
+       applied, changed or removed in the main window switches the
+       solvent subtraction of the Coherence window off.
+     - Demo data for them: demo_solution.csv with demo_solvent.csv
+       (and the same pair as measured, demo_solution_raw.csv with
+       demo_solvent_raw.csv), demo_aniso_par.csv with
+       demo_aniso_perp.csv (and the same pair as measured,
+       demo_aniso_raw_*.csv), and demo_solvation.csv
+       (time-resolved emission with a spectral shift, for the fit of a
+       band); the steps and the expected numbers are in README_demo.txt.
+     - Fits with a free IRF width (Fit trace, Global Analysis, Target
+       Analysis): an FWHM above half the range of the delays counts as
+       lost, like one the delays do not resolve, and the fit is
+       repeated in two steps (IRF fixed, then free). Before, a decay
+       much slower than its start value (a ns decay, start 1 ps) could
+       end with the FWHM at the range of the delays and a meaningless
+       time constant. A width that stays there is marked as not
+       determined.
+     - Auto Analysis: the status line after a run names the steps
+       that could not be decided ("Not determined: chirp") instead of
+       saying that no correction was needed.
+     - Plots: each of the three maps of the Global Analysis window
+       (Experimental, Global fit, Residual) has a color bar with the
+       name of the signal; the Global fit map had none. On
+       a zoomed logarithmic y-axis, numbers of more than five
+       characters are written with a common factor (x 10^n), so that
+       the label of the axis stays inside the picture. The LOF axis
+       of the convergence plot of the MCR-ALS window shows plain
+       numbers (1.37, 1.38) when the LOF changes by less than a
+       decade; before, these numbers were cut off at the left edge.
+     - Plots in rows and columns: in every window with several
+       plots, the plots of a row have exactly the same upper and
+       lower edge and the plots of a column the same left edge. A
+       plot without a color bar does not leave the room of the bar
+       of a map free: in the Coherence, Target and Lifetime Density
+       Analysis windows, in the rows under the maps of the Global
+       Analysis window and on the Residual tab of the Auto Analysis
+       window, the room right of such a plot is about as wide as the
+       blank left of the label of its y-axis. These stay exactly as
+       wide as the map above or below them: the spectrum under the
+       map of the Lifetime Density Analysis window (it has the
+       wavelength axis of the map) and of the Time-Frequency window,
+       the plots of the SVD window and of the Corrections tab of the
+       Auto Analysis window. The DADS and the EADS of its Components
+       tab are equally wide.
+     The residual of the per-pixel fit of the Coherence window is kept
+     until its settings change. Sessions of earlier versions load as
+     before. For scripts, trspec.coherence has the new functions
+     coh_spectrum, solvent_vc, solvent_shifted, solvent_band and
+     fit_solvent_coherence.
+
   1.0.2  (2026-11-22)
      First version with a number: the program of preview 12, under the
      number of the MATLAB program whose functions it has. Its texts

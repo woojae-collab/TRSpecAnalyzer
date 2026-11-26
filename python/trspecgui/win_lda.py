@@ -9,7 +9,7 @@ from .textfit import legend, setTitle
 from .widgets import (AX_BG, FONT_PT, BlitManager, NumEdit, PlotCanvas,
                       VScroll, button, colorButton, label, panel, runBusy,
                       sciTicks, sidePanel, styleAxes, textArea, tip)
-from .win_base import Z_LABEL, ChildWindow, absMax, mapLayout
+from .win_base import ChildWindow, absMax, mapLayout
 from .win_kinfit import writeTable
 
 EPS = float(np.finfo(float).eps)
@@ -186,13 +186,17 @@ class LdaWindow(ChildWindow):
         self.axKin = self.cvKin.figure.add_subplot(111)
         self.axL = self.cvL.figure.add_subplot(111)
 
-        def lay1(cv, ax):
+        def lay1(cv, ax, R=22.0):
+            # (R: about as wide as the blank left of the label of the
+            # y-axis. A(lambda) under the map has the wavelength axis
+            # of the map and therefore its width: R = the room of the
+            # color bar)
             W, H = cv.sizePt()
-            cv.place(ax, 58.0, 34.0, W - 58.0 - 16.0, H - 34.0 - 22.0)
+            cv.place(ax, 58.0, 34.0, W - 58.0 - R, H - 34.0 - 22.0)
 
         self.cvMap.layoutFcn = self._layMap
         self.cv1D.layoutFcn = lambda: lay1(self.cv1D, self.ax1D)
-        self.cvSpec.layoutFcn = lambda: lay1(self.cvSpec, self.axSpec)
+        self.cvSpec.layoutFcn = lambda: lay1(self.cvSpec, self.axSpec, 78.0)
         self.cvKin.layoutFcn = lambda: lay1(self.cvKin, self.axKin)
         self.cvL.layoutFcn = lambda: lay1(self.cvL, self.axL)
         self.blMap = BlitManager(self.cvMap)
@@ -303,7 +307,7 @@ class LdaWindow(ChildWindow):
         setTitle(self.axSpec, T_SPEC)
         styleAxes(self.axKin, grid=True)
         self.axKin.set_xlabel('Delay time (%s)' % app.tUnitAx())
-        self.axKin.set_ylabel(Z_LABEL)
+        self.axKin.set_ylabel(self.app.sigName())
         setTitle(self.axKin, T_KIN)
         self._emptyL()
         self.xhV = self.xhH = None
@@ -417,7 +421,7 @@ class LdaWindow(ChildWindow):
         cax.set_visible(h is not None)
         if h is not None:
             cb = self.cvMap.figure.colorbar(h, cax=cax)
-            cb.set_label(Z_LABEL + '  amplitude', fontsize=FONT_PT)
+            cb.set_label(self.app.sigName() + '  amplitude', fontsize=FONT_PT)
             cb.ax.tick_params(labelsize=FONT_PT, length=3)
             sciTicks(cb.ax, 'y')
         if not np.isfinite(self.curLambda):
@@ -523,7 +527,7 @@ class LdaWindow(ChildWindow):
                 color=(0.5, 0.5, 0.5), linewidth=0.8, label='Residual')
         ax.axhline(0, color='k', linestyle=':', linewidth=0.8)
         ax.set_xlabel('Delay time (%s)' % app.tUnitAx())
-        ax.set_ylabel(Z_LABEL)
+        ax.set_ylabel(self.app.sigName())
         if np.any(t > 0):
             ax.set_xscale('log')
             xl = [float(np.min(t[t > 0])), float(np.max(t))]

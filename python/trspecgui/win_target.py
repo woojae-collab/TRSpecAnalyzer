@@ -20,10 +20,9 @@ from .widgets import (AX_BG, FONT_PT, BlitManager, DataTable, NumEdit,
                       PlotCanvas, VScroll, button, colorButton, flowbox,
                       label, lineColor, monoFont, panel, runBusy, sciTicks,
                       sidePanel, styleAxes, textArea, tip)
-from .win_base import Z_LABEL, ChildWindow, absMax, fitSize, mapLayout
+from .win_base import ChildWindow, absMax, fitSize, mapLayout
 from .win_kinfit import irfLimitNote, writeTable
 
-AMP_LABEL = 'Amplitude (ΔA or Intensity)'
 RUN_COLOR = (0.60, 0.25, 0.45)
 
 PRESET_KEYS = ['seq3', 'seq3gs', 'seq4', 'par3', 'branch', 'branchLoss',
@@ -478,8 +477,12 @@ class TargetWindow(ChildWindow):
         self.caxRes = self.cvRes.figure.add_axes([0.9, 0.1, 0.02, 0.8])
 
         def lay1(cv, ax):
+            # (the three plots without a color bar do not leave the
+            # room of the bar of the residual map free: the room right
+            # of them is about as wide as the blank left of the label
+            # of their y-axis)
             W, H = cv.sizePt()
-            cv.place(ax, 58.0, 34.0, W - 58.0 - 16.0, H - 34.0 - 22.0)
+            cv.place(ax, 58.0, 34.0, W - 58.0 - 22.0, H - 34.0 - 22.0)
 
         self.cvSAS.layoutFcn = lambda: lay1(self.cvSAS, self.axSAS)
         self.cvPop.layoutFcn = lambda: lay1(self.cvPop, self.axPop)
@@ -1047,6 +1050,8 @@ class TargetWindow(ChildWindow):
             'fwhmLo': float(o.fwhm_lo),
             'fwhmAtLimit': bool(o.fwhm_at_limit),
             'irfRetry': int(o.irf_retry),
+            'fwhmHi': float(o.fwhm_hi),
+            'fwhmTooWide': bool(o.fwhm_too_wide),
             't0Fixed': bool(t0Fix or irfM == 'none'),
             'fwhmFixed': bool(fwFix or irfM == 'none'),
             'irf': irfM, 'tRange': tR,
@@ -1201,12 +1206,17 @@ class TargetWindow(ChildWindow):
             if res.get('fwhmAtLimit') is True:
                 L.append('IRF FWHM = %.4g %s  [not resolved]' % (
                     res['fwhm'], u))
+            elif res.get('fwhmTooWide') is True:
+                L.append('IRF FWHM = %.4g %s  [not determined]' % (
+                    res['fwhm'], u))
             else:
                 L.append(irfLine('IRF FWHM', res['fwhm'], res['fwhmStd'],
                                  res['fwhmFixed'], u))
             L += irfLimitNote(app, Result(
                 fwhm_at_limit=bool(res.get('fwhmAtLimit', False)),
                 fwhm_lo=res.get('fwhmLo', np.nan),
+                fwhm_too_wide=bool(res.get('fwhmTooWide', False)),
+                fwhm_hi=res.get('fwhmHi', np.nan),
                 irf_retry=int(res.get('irfRetry', 0))))
         ca = res.get('ca')
         if isinstance(ca, dict) and ca['order'] > 0:
@@ -1333,7 +1343,7 @@ class TargetWindow(ChildWindow):
         isDAS = self.ddSpec.currentText() == 'DAS'
         norm = self.cbNorm.isChecked()
         if res is None:
-            ax.set_ylabel(AMP_LABEL)
+            ax.set_ylabel(('Amplitude (%s)' % self.app.sigName()))
             setTitle(ax, 'Spectra (run fit)')
             ax.set_xlim(self.wlLo, self.wlHi)
             self.hWLspec = self._marker(ax, self.blSAS, False)
@@ -1376,7 +1386,7 @@ class TargetWindow(ChildWindow):
                         color=caCol[q], label=caNm[q])
         ax.axhline(0, color='k', linestyle=':', linewidth=0.8)
         self.hWLspec = self._marker(ax, self.blSAS, False)
-        ax.set_ylabel('Normalized amplitude' if norm else AMP_LABEL)
+        ax.set_ylabel('Normalized amplitude' if norm else ('Amplitude (%s)' % self.app.sigName()))
         if isDAS:
             setTitle(ax, 'Decay-associated spectra (DAS) of this fit',
                      'DAS of this fit', 'DAS')
@@ -1438,7 +1448,7 @@ class TargetWindow(ChildWindow):
                             color=(0.4, 0.4, 0.4), label='artifact')
             ax.plot(t, res['fit'][iw, :], 'r-', linewidth=1.5, label='Fit')
         ax.set_xlabel('Delay time (%s)' % app.tUnitAx())
-        ax.set_ylabel(Z_LABEL)
+        ax.set_ylabel(self.app.sigName())
         setTitle(ax, 'Kinetics at %s = %.4g %s' % (
             app.xSym(), wl[iw], app.xUnitAx()))
         self.applyTimeAxis(ax)
@@ -1499,7 +1509,7 @@ class TargetWindow(ChildWindow):
         cax.set_visible(h is not None)
         if h is not None:
             cb = self.cvRes.figure.colorbar(h, cax=cax)
-            cb.set_label(Z_LABEL, fontsize=FONT_PT)
+            cb.set_label(self.app.sigName(), fontsize=FONT_PT)
             cb.ax.tick_params(labelsize=FONT_PT, length=3)
             sciTicks(cb.ax, 'y')
         self._layRes()

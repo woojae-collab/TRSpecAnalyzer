@@ -13,9 +13,9 @@ and its result is remembered as the full view ('home').
 """
 import numpy as np
 from matplotlib.collections import QuadMesh
-from matplotlib.ticker import (AutoLocator, FixedLocator, FuncFormatter,
-                               Locator, LogLocator, MaxNLocator,
-                               NullFormatter, ScalarFormatter)
+from matplotlib.ticker import (AutoLocator, FixedLocator, Formatter,
+                               FuncFormatter, Locator, LogLocator,
+                               MaxNLocator, NullFormatter, ScalarFormatter)
 
 STEP = 1.2            # one notch of the wheel
 MIN_FRACTION = 1e-6   # smallest view, as a part of the full one
@@ -219,6 +219,53 @@ def _plain(v, _pos=None):
     return '%g' % float('%.6g' % v)
 
 
+class ZoomLogFormatter(Formatter):
+    """Plain numbers on a zoomed logarithmic y-axis. Where one of them
+    would need more than five characters (300000, 0.0002), all are
+    written with a common factor (x 10^n) above the axis, as on the
+    linear axes: wide numbers push the label of the axis off the
+    picture."""
+
+    def __init__(self):
+        self._exp = 0
+
+    def set_locs(self, locs):
+        self.locs = locs
+        self._exp = 0
+        v = np.asarray(locs, float)
+        v = v[np.isfinite(v) & (v > 0)]
+        if self.axis is not None and v.size:
+            lo, hi = sorted(self.axis.get_view_interval())
+            v = v[(v >= lo * (1 - 1e-9)) & (v <= hi * (1 + 1e-9))]
+        if v.size and max(len(_plain(x)) for x in v) > 5:
+            self._exp = int(np.floor(np.log10(float(np.min(v))) + 1e-9))
+
+    def __call__(self, v, pos=None):
+        return _plain(v / 10.0 ** self._exp)
+
+    def get_offset(self):
+        if self._exp == 0:
+            return ''
+        return r'$\times\mathdefault{10^{%d}}$' % self._exp
+
+
+def plainLogY(ax):
+    """Plain numbers (1.37, 1.38) at the ticks of a logarithmic y-axis,
+    as on a zoomed one. For values that stay within a decade: there
+    matplotlib writes every tick as 1.375 x 10^0, which is wider than
+    the room left of the plot, so that the numbers were cut off and
+    the label of the axis fell off the picture."""
+    axis = ax.yaxis
+    axis.set_major_locator(ZoomLogLocator())
+    axis.set_major_formatter(ZoomLogFormatter())
+    axis.get_offset_text().set_size(max(axis.label.get_size() - 1.0, 6.0))
+    axis.set_minor_locator(LogLocator(base=10.0, subs=np.arange(2, 10)))
+    axis.set_minor_formatter(NullFormatter())
+    z = ax.__dict__.get('_view')
+    if z is not None:           # (ticks kept aside from an earlier drawing:
+        z['ticks'].pop('y', None)    # a reset of the zoom leaves these)
+
+
 def _mine(axis):
     return isinstance(axis.get_major_locator(),
                       (ZoomLogLocator, ZoomAutoLocator))
@@ -246,7 +293,12 @@ def _ticks(ax, z):
                                axis.get_minor_formatter())
             if isLog:
                 axis.set_major_locator(ZoomLogLocator())
-                axis.set_major_formatter(FuncFormatter(_plain))
+                if key == 'y':
+                    axis.set_major_formatter(ZoomLogFormatter())
+                    ot = axis.get_offset_text()
+                    ot.set_size(max(axis.label.get_size() - 1.0, 6.0))
+                else:
+                    axis.set_major_formatter(FuncFormatter(_plain))
                 axis.set_minor_locator(
                     LogLocator(base=10.0, subs=np.arange(2, 10)))
                 axis.set_minor_formatter(NullFormatter())

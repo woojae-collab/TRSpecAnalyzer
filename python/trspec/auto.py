@@ -11,7 +11,7 @@ import math
 import numpy as np
 
 from ._util import Result, interp1_nan
-from .chirp import chirp_model, fit_chirp_params
+from .chirp import chirp_model, fit_chirp_params, chirp_shift
 from .kinetics import matlab_round
 
 _REALMIN = np.finfo(float).tiny
@@ -554,11 +554,7 @@ def auto_preprocess(wl, t, D, opt=None, time_unit='ps', spec_unit='nm'):
     tOut = t.copy()
     if ch['status'] == 'applied':
         try:
-            for i in range(M):
-                if not np.isfinite(ch['t0'][i]):
-                    Dc[i, :] = np.nan
-                    continue
-                Dc[i, :] = interp1_nan(t, Db[i, :], t + ch['t0'][i])
+            Dc = chirp_shift(t, Db, ch['t0'])
             t0Guess = 0.0
         except Exception as errI:
             Dc = Db.copy()
@@ -1186,6 +1182,33 @@ def auto_summarize(P, opt=None, prog=None):
 _NONFIN = None
 
 
+def auto_done_text(P):
+    """Status line of the Auto Analysis window after a run: whether
+    corrections are proposed, and which of the steps could not be
+    decided - the background (too few delays before the signal, first
+    delays that look like signal, no time zero), the mask (too many
+    noisy channels) or the chirp (no time zero, or no reliable time
+    zero along the spectrum). Of such a step the run does not say that
+    no correction is needed; it is listed under "To check by eye" in
+    the report."""
+    und = []
+    if P.bgStatus in ('few', 'signal', 'notime0'):
+        und.append('background')
+    if P.maskStatus == 'toomany':
+        und.append('mask')
+    if P.chirp['status'] in ('failed', 'notime0'):
+        und.append('chirp')
+    if P.changed:
+        s = 'Done. The data are unchanged so far.'
+    elif not und:
+        s = 'Done. No correction was needed.'
+    else:
+        s = 'Done. No correction proposed.'
+    if und:
+        s = '%s Not determined: %s (see Report).' % (s, ', '.join(und))
+    return s
+
+
 def _sp(fmt, *args):
     """sprintf with MATLAB's spelling of NaN and Inf."""
     global _NONFIN
@@ -1201,7 +1224,7 @@ def _sp(fmt, *args):
     return s
 
 
-def auto_report_lines(P, S=None, src='current data', version='1.0.2'):
+def auto_report_lines(P, S=None, src='current data', version='1.1.0'):
     """Text of the report of the automatic analysis (list of lines):
     corrections; with a summary S also the number of components, the
     chosen fit, oscillations and the list of things to check by eye."""

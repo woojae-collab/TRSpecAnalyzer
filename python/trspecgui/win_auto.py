@@ -11,8 +11,9 @@ import numpy as np
 from matplotlib.ticker import FuncFormatter
 from PySide6 import QtCore, QtWidgets
 
-from trspec.auto import (auto_preprocess, auto_report_lines,
-                         auto_select_model, auto_summarize)
+from trspec.auto import (auto_done_text, auto_preprocess,
+                         auto_report_lines, auto_select_model,
+                         auto_summarize)
 from trspec.kinetics import ca_options
 from trspec._util import Result
 
@@ -20,7 +21,7 @@ from .textfit import legend, setSpan, setTitle
 from .widgets import (AX_BG, FitLabel, NumEdit, PlotCanvas, button,
                       colorButton, label, lineColor, runProgress, sciTicks,
                       sidePanel, styleAxes, textArea, tip)
-from .win_base import Z_LABEL, ChildWindow, mapLayout, mapOn
+from .win_base import ChildWindow, mapLayout, mapOn
 
 RUN_COLOR = (0.20, 0.50, 0.45)
 IDLE = 'Press "Run"'
@@ -52,7 +53,8 @@ CA_COLORS = ((0.15,) * 3, (0.45,) * 3, (0.70,) * 3)
 KIN_LEGEND_PT = 86.0        # room beside the kinetics for their legend
 
 
-def lay1(cv, ax, L=58.0, B=34.0, R=16.0, T=22.0):
+def lay1(cv, ax, L=58.0, B=36.0, R=16.0, T=24.0):
+    # (B and T as the maps: the plots of a row begin and end together)
     W, H = cv.sizePt()
     cv.place(ax, L, B, W - L - R, H - B - T)
     setSpan(ax, 0.0, W)
@@ -271,7 +273,15 @@ class AutoWindow(ChildWindow):
             b.setEnabled(False)
             b.setMinimumHeight(28)
             lv.addWidget(b)
+        # (three lines: the line after a run can name steps that were not
+        # determined, and on a small screen with a scaled display the
+        # longest one does not fit into two)
         self.lblStatus = label('Ready.', color=(0.2, 0.2, 0.2))
+        self.lblStatus.setWordWrap(True)
+        self.lblStatus.setAlignment(QtCore.Qt.AlignmentFlag.AlignLeft
+                                    | QtCore.Qt.AlignmentFlag.AlignTop)
+        self.lblStatus.setFixedHeight(
+            3 * self.lblStatus.fontMetrics().lineSpacing() + 4)
         lv.addWidget(self.lblStatus)
         self.txtHelp = QtWidgets.QPlainTextEdit()
         self.txtHelp.setReadOnly(True)
@@ -310,8 +320,8 @@ class AutoWindow(ChildWindow):
                 T=24.0, B=36.0)
             return cv, ax, cax
 
-        def plain(cv, ax, L=58.0):
-            cv.layoutFcn = lambda: lay1(cv, ax, L=L)
+        def plain(cv, ax, L=58.0, R=16.0):
+            cv.layoutFcn = lambda: lay1(cv, ax, L=L, R=R)
 
         # ---- Corrections -----------------------------------------------
         tabCor = QtWidgets.QWidget()
@@ -322,8 +332,9 @@ class AutoWindow(ChildWindow):
         self.cvCor, self.axCor, self.caxCor = mapCanvas()
         self.cvBg, self.axBg = canvas()
         self.cvNz, self.axNz = canvas()
-        plain(self.cvBg, self.axBg)
-        plain(self.cvNz, self.axNz)
+        # (under the maps: the room of their color bars stays free)
+        plain(self.cvBg, self.axBg, R=74.0)
+        plain(self.cvNz, self.axNz, R=74.0)
         g.addWidget(self.cvRaw, 0, 0)
         g.addWidget(self.cvCor, 0, 1)
         g.addWidget(self.cvBg, 1, 0)
@@ -347,7 +358,10 @@ class AutoWindow(ChildWindow):
         tl.setSpacing(8)
         tl.addWidget(self.cvSV, 1)
         tl.addWidget(self.cvRms, 1)
-        g.addLayout(tl, 0, 0)
+        tlv = QtWidgets.QVBoxLayout()
+        tlv.setSpacing(4)
+        tlv.addLayout(tl, 1)
+        g.addLayout(tlv, 0, 0)
         kin = QtWidgets.QVBoxLayout()
         kin.setSpacing(4)
         kc = QtWidgets.QHBoxLayout()
@@ -365,12 +379,18 @@ class AutoWindow(ChildWindow):
         self.lblKin = FitLabel(color=(0.35, 0.35, 0.35))
         kc.addWidget(self.lblKin, 1)
         kin.addLayout(kc)
+        # (the two plots left of the kinetics begin as far down as the
+        # kinetics plot, which has this row of controls above it)
+        # (the row and the spacing under it; no spacing follows a spacer)
+        tlv.insertSpacing(0, self.edKin.sizeHint().height() + kin.spacing())
         self.cvKin, self.axKinL, self.axKinR = canvas(2)
         self.cvKin.layoutFcn = self._layKin
         kin.addWidget(self.cvKin, 1)
         g.addLayout(kin, 0, 1)
         self.cvDADS, self.axDADS = canvas()
         self.cvEADS, self.axEADS = canvas()
+        # (the two are equally wide; the EADS do not leave the room of
+        # the legend of the kinetics above them free)
         plain(self.cvDADS, self.axDADS)
         plain(self.cvEADS, self.axEADS)
         g.addWidget(self.cvDADS, 1, 0)
@@ -388,8 +408,11 @@ class AutoWindow(ChildWindow):
         self.cvRes, self.axRes, self.caxRes = mapCanvas()
         self.cvPow, self.axPow = canvas()
         self.cvProf, self.axProf = canvas()
-        plain(self.cvPow, self.axPow, L=62.0)
-        plain(self.cvProf, self.axProf)
+        # (beside the map: the room of its color bar, so that all plot
+        # boxes are equally wide)
+        # (R: about as wide as the blank left of the label of the y-axis)
+        plain(self.cvPow, self.axPow, L=62.0, R=22.0)
+        plain(self.cvProf, self.axProf, L=62.0, R=22.0)
         g.addWidget(self.cvRes, 0, 0, 2, 1)
         g.addWidget(self.cvPow, 0, 1)
         g.addWidget(self.cvProf, 1, 1)
@@ -538,10 +561,7 @@ class AutoWindow(ChildWindow):
         self.btnGA.setEnabled(self.S is not None)
         self.btnSave.setEnabled(True)
         self.tabs.setCurrentIndex(0)
-        if P.changed:
-            self.lblStatus.setText('Done. The data are unchanged so far.')
-        else:
-            self.lblStatus.setText('Done. No correction was needed.')
+        self.lblStatus.setText(auto_done_text(P))
         self.keepState()
 
     def keepState(self):
@@ -606,10 +626,8 @@ class AutoWindow(ChildWindow):
             self.btnSave.setEnabled(True)
             if self.applied:
                 msg = 'Corrections applied to the main data.'
-            elif P.changed:
-                msg = 'Done. The data are unchanged so far.'
             else:
-                msg = 'Done. No correction was needed.'
+                msg = auto_done_text(P)
             self.lblStatus.setText('%s  [restored]' % msg)
         except Exception:
             # A kept run that cannot be shown: back to the empty window.
@@ -746,6 +764,13 @@ class AutoWindow(ChildWindow):
         app, P = self.app, self.P
         if P is None or self.applied:
             return
+        if app.aniOn and app.aniView == 'r':
+            self.alert('The corrections cannot be applied while the main '
+                       'window shows the anisotropy r. Choose the view '
+                       '"Parallel" or "Magic angle", run again and apply '
+                       'there: both polarizations are then corrected alike.',
+                       'Anisotropy view')
+            return
         if not P.changed:
             self.inform('The report proposes no correction.',
                         'Nothing to apply')
@@ -774,6 +799,7 @@ class AutoWindow(ChildWindow):
         app.childWindows.pop(self.KEY, None)
         try:
             app.deltaA = np.array(P.Dfull, float)
+            app.pendingAuto = app.autoLogEntry(P)
             app.applyCropByRange(float(np.min(P.wl)), float(np.max(P.wl)),
                                  float(tK[0]), float(tK[-1]))
             if P.chirp['shift'] != 0:
@@ -940,7 +966,7 @@ class AutoWindow(ChildWindow):
             setTitle(ax, 'No background subtracted')
         ax.axhline(0, color='k', linestyle=':', linewidth=0.8)
         ax.set_xlabel(app.xAxLabel())
-        ax.set_ylabel(Z_LABEL)
+        ax.set_ylabel(self.app.sigName())
         ax.set_xlim(float(np.min(wlI)), float(np.max(wlI)))
         sciTicks(ax, 'y')
 
@@ -1114,7 +1140,8 @@ class AutoWindow(ChildWindow):
     def _layKin(self):
         cv = self.cvKin
         W, H = cv.sizePt()
-        L, B, T, gap = 58.0, 34.0, 12.0, 6.0
+        # (B and T as the plots beside and below)
+        L, B, T, gap = 58.0, 36.0, 24.0, 6.0
         w = W - L - KIN_LEGEND_PT
         h = H - B - T
         if self.kMode == 'split':
@@ -1210,7 +1237,7 @@ class AutoWindow(ChildWindow):
             if tk[iL[-1]] > tk[iL[0]]:
                 axL.set_xlim(tk[iL[0]], tk[iL[-1]])
             axL.set_xlabel(tLab)
-            axL.set_ylabel(Z_LABEL)
+            axL.set_ylabel(self.app.sigName())
             sciTicks(axL, 'y')
         if iR.size:
             axR.axhline(0, color='k', linestyle=':', linewidth=0.8)
@@ -1225,7 +1252,7 @@ class AutoWindow(ChildWindow):
                 axR.minorticks_off()
             if iL.size == 0:
                 axR.set_xlabel(tLab)
-                axR.set_ylabel(Z_LABEL)
+                axR.set_ylabel(self.app.sigName())
                 sciTicks(axR, 'y')
             else:
                 axR.tick_params(labelleft=False)

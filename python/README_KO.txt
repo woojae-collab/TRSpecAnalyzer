@@ -1,9 +1,9 @@
-﻿TRSpecAnalyzer - Python판 1.0.2
+﻿TRSpecAnalyzer - Python판 1.1.0
 ===============================
 
 MATLAB 프로그램 TRSpecAnalyzer의 Python판입니다. 시간분해 분광 데이터
 (TA, TR-PL, TR-Raman, TR-IR)를 분석하며 MATLAB 없이 실행됩니다.
-1.0.2는 MATLAB판 v1.0.2의 창을 모두 갖추고 있고 계산 방식도 같습니다.
+1.1.0은 MATLAB판 v1.1.0의 창을 모두 갖추고 있고 계산 방식도 같습니다.
 버전 번호는 "기능이 같은 MATLAB판의 번호"입니다. 창의 사용법은 MATLAB판
 사용 설명서를 그대로 보시면 됩니다.
 
@@ -26,9 +26,15 @@ MATLAB 프로그램 TRSpecAnalyzer의 Python판입니다. 시간분해 분광 �
 - 보정: Background Corr, Chirp Corr, Crop, Set t=0, Mask, Reset all
 - 여러 파일 불러와 평균 (Load & Average, Auto-align 포함)
 - Export Corrected Data, Save / Load Session
-- 분석: Fit trace, SVD, Global Analysis
+- 데이터 도구(둘째 줄 버튼): Subtract data (용매나 기판만 측정한 데이터 빼기,
+  scale과 time shift는 직접 입력 또는 추정), Anisotropy (불러온 parallel 데이터
+  옆에 perpendicular 데이터를 불러와 parallel / perpendicular / magic angle /
+  anisotropy r 중 골라 보기), ΔA <-> ΔT/T 변환. 파일의 숫자가 무엇인지
+  (ΔA, ΔT/T, Intensity)는 불러올 때 고릅니다.
+- 분석: Fit trace (한 파장, 또는 대역의 적분이나 평균), SVD, Global Analysis
   (coherent artifact 항, stretched, IRF FWHM 처리까지 MATLAB판과 같음),
-  Target Analysis, LDA, MCR-ALS, Coherence (Time-frequency 포함), Auto Analysis
+  Target Analysis, LDA, MCR-ALS, Coherence (Time-frequency 포함, 용매만 측정한
+  데이터로 용매의 vibrational coherence 빼기 포함), Auto Analysis
 - 분석 창의 결과는 창을 닫아도 남고 세션 파일에 저장됩니다. 메인 창의 데이터가
   바뀌면 지워집니다.
 
@@ -128,6 +134,35 @@ Target Analysis 전용 데모 두 가지 (README_demo.txt 의 뒷부분에 순�
                              넣으면 kf, kb, k2, k3 = 4.99, 15.0, 100.0, 1998 ps,
                              RMS 0.053
 
+1.1.0에서 추가된 기능용 데모 두 쌍 (README_demo.txt 의 "Solvent demo", "Anisotropy demo"
+부분에 순서가 있습니다)
+- demo\demo_solution.csv     cyclohexane에 녹인 용질과 cyclohexane만 측정한 데이터.
+  demo\demo_solvent.csv      Coherence 창의 "Solvent coherence...": A = 0.700,
+                             time shift 0.0030 ps. 용매의 801 cm-1 선이 없어지고
+                             215, 590 cm-1가 남습니다. 그 뒤 메인 창의 "View"에서
+                             용매가 빠진 데이터를 볼 수 있습니다.
+- demo\demo_solution_raw.csv   같은 두 파일의 측정된 그대로의 상태 (background,
+  demo\demo_solvent_raw.csv    chirp). solution 파일을 보정한 뒤 "Solvent
+                             coherence..."에서 solvent 파일을 불러오면 같은 보정이
+                             적용됩니다. A = 0.699, time shift 0.0030 ps.
+- demo\demo_aniso_par.csv    한 시료를 두 편광으로 측정한 데이터. "Anisotropy...",
+  demo\demo_aniso_perp.csv   tail matching: G = 1.15. 이른 delay에서 r = 0.38과
+                             -0.12이고 48 ps로 사라집니다.
+- demo\demo_aniso_raw_par.csv   같은 두 파일의 측정된 그대로의 상태 (background, pump
+  demo\demo_aniso_raw_perp.csv  산란, chirp 포함). parallel 파일을 전처리한 뒤
+                             perpendicular 파일을 불러오면 같은 보정이 적용됩니다.
+- demo\demo_aniso_raw_perp_late.csv  perpendicular 측정을 time zero가 0.05 ps 늦은
+                             상태로 한 번 더 한 것. "Anisotropy..."의 "Estimate":
+                             time shift -0.050 ps.
+
+Time-resolved emission 데모 (Signal = Intensity로 불러옵니다. README_demo.txt 의
+"Solvation demo" 부분에 순서가 있습니다)
+- demo\demo_solvation.csv    용매가 완화되는 동안 띠가 장파장으로 이동하는 데이터.
+                             420 ~ 760 nm 대역을 Fit trace (Integral, 성분 1개,
+                             시작값 1000)로 피팅하면 형광 수명 3987 ps만 나옵니다.
+                             "Band position...", Log-normal fit, 0.2 ps부터 지수
+                             3개: 0.245, 2.92, 14.8 ps (만들 때 0.25, 3, 15).
+
 
 4. 업데이트
 -----------
@@ -177,8 +212,6 @@ Target Analysis 전용 데모 두 가지 (README_demo.txt 의 뒷부분에 순�
   작아지거나 짧은 표현으로 바뀌고, 버튼 줄은 다음 줄로 넘어가며, 창이 낮으면 설정
   칸과 그림이 스크롤됩니다. 메인 창 오른쪽 위의 상태 글은 너무 길면 "..."으로
   줄어들고, 마우스를 올리면 전체가 보입니다.
-- Coherence 창: t_min / t_max, 평균 구간, 표시 범위를 두 줄이 아니라 한 줄에
-  나란히 둡니다.
 - Target Analysis: "Export:" 글자가 버튼들 위가 아니라 같은 줄 앞에 있습니다.
   창이 낮으면 scheme 칸과 parameter 표가 조금 낮아집니다 (결과 창 자리 확보).
 - Auto Analysis: Report의 긴 줄은 다음 줄로 이어집니다. 창이 좁으면 작은 그림 두
@@ -250,6 +283,104 @@ Target Analysis 전용 데모 두 가지 (README_demo.txt 의 뒷부분에 순�
 
 10. 변경 기록
 -------------
+1.1.0  (2026-11-26)
+   MATLAB판 1.1.0의 새 기능들을 같은 계산 방식으로 넣었습니다
+   (자세한 내용은 저장소의 CHANGELOG.md).
+   - 신호 종류: 파일의 숫자가 무엇인지(ΔA, ΔT/T, Intensity)를 불러올 때 고르고,
+     축 이름, 컬러바, 내보내기 파일 이름이 이를 따릅니다. ΔA <-> ΔT/T 변환은
+     정확한 관계식으로 합니다 ("ΔA <-> ΔT/T..." 버튼).
+   - "Subtract data...": 같은 축에서 측정한 기준(용매, 기판)을 뺍니다:
+     데이터 - scale x 기준(t - shift). scale과 shift는 직접 입력하거나 최소제곱으로
+     추정합니다. 기준 파일은 측정한 그대로 불러오면 되고, crop과 Auto Analysis에서
+     적용한 보정을 따라갑니다.
+   - "Anisotropy...": 불러온 (parallel) 데이터 옆에 perpendicular 데이터를 불러와
+     똑같이 보정합니다. "View"에서 parallel, perpendicular, magic angle,
+     anisotropy r 중 하나를 고르면 보이는 것이 분석 대상이 됩니다. G는 직접
+     입력하거나 tail matching으로 구합니다. tail matching에 제안되는 범위는
+     delay의 마지막 한 decade(마지막 delay의 1/10부터 끝까지)입니다. tail
+     matching은 모든 파장에 대해 G 하나를 구합니다. 창의 세 번째 그림이 tail
+     범위에서 파장 하나하나의 G를 불확도와 함께 보여 주어, G 하나로 충분한지
+     확인할 수 있습니다 (보기 전용이며 계산에는 쓰이지 않습니다).
+     두 측정의 time zero가 다를 때는 "Time shift of the perpendicular data"에
+     값을 입력하거나 "Estimate"로 구합니다. "Estimate"는 신호가 올라오는 구간에서
+     perpendicular 데이터가 parallel 데이터를 가장 잘 따라가는 shift를 찾습니다
+     (파장마다 배율과 offset을 따로 둡니다). 값과 함께 파장 사이의 흩어짐에서 구한
+     표준편차를 알려 줍니다.
+   - 분석 창의 설정과 결과가 view마다 따로 보관됩니다. view를 바꾸면 분석 창은
+     닫히고, 고른 view의 결과가 다시 돌아옵니다 (세션 파일에도 저장됩니다).
+     어떤 view의 데이터가 바뀌면 그 view에 보관된 것은 지워집니다: 보정, crop,
+     Reset all은 전부, 새 G나 perpendicular 데이터의 새 time shift는 Parallel view를
+     뺀 전부, 새 threshold는 r view만.
+   - Coherence 창의 "Solvent coherence...": 용매만 측정한 데이터의 vibrational
+     coherence를 FFT 전에 잔차에서 뺍니다. 배율과 time shift는 용매 모드가 있는
+     대역에서 Fourier 변환의 실수부와 허수부로 추정합니다
+     (M. Liebel, 학위논문, Oxford 2014).
+     여기서 빼는 동안("Apply") 메인 창의 "View"에서 용매가 빠진 데이터를 고를 수
+     있습니다: "Solvent coherence subtracted"(분석의 time window 안에서 용매의
+     진동 부분만) 또는 "Solvent signal subtracted"(여기서 구한 배율과 shift로
+     모든 delay에서 용매 신호 전체). 2D 맵, export, 모든 분석이 보이는 view의
+     데이터를 씁니다. view를 바꾸면 분석 창은 닫히고, 설정과 결과는 view마다
+     보관되어 그 view로 돌아오면 다시 나옵니다.
+   - Coherence 창, 빼기 전과 후: 용매 빼기를 하면 빼기 전의 결과도 함께 보관됩니다.
+     그림 위의 줄에서 어느 맵을 볼지 고르고, 곡선 그림에는 빼기 전의 곡선이 회색으로
+     함께 그려지며, "Side by side..."는 두 맵을 같은 색 범위로 나란히 보여 주는 창을
+     엽니다. export는 그림에 보이는 것을 저장합니다.
+   - Coherence 창의 "Color range": |FFT|^2 맵의 색 범위(z scale)를 직접 입력할 수
+     있습니다. 예를 들어 최댓값을 작게 주면 약한 모드가 잘 보입니다. "Auto"를 누르면
+     자동 범위로 돌아갑니다.
+   - Fit trace: 한 파장 대신 여러 파장의 대역을 피팅할 수 있습니다 ("Band, to:").
+     spectral axis에 대한 적분 또는 평균을 씁니다. Anisotropy r view에서는 두 편광의
+     대역 값으로 r을 계산합니다.
+   - "Band position..." (새 창): 띠가 delay마다 어디에 있는지를 구합니다 (dynamic
+     Stokes shift 같은 spectral shift). 위치는 first moment, 꼭대기를 지나는
+     포물선의 최댓값, log-normal 띠 피팅의 최댓값 중 하나로 구하며 (창에서 선택),
+     cm-1 또는 nm로 나타냅니다. nm당 intensity는 cm-1당 신호로 변환합니다. 위치의
+     시간 변화는 지수 1 ~ 4개와 상수로 피팅합니다. 창에는 한 delay의 띠와 모델,
+     위치와 피팅, C(t), 띠의 폭이 그려지고, 표로 내보낼 수 있습니다.
+   - delay 방향의 보간: chirp 보정과 time shift("Subtract data...", perpendicular
+     데이터)는 delay 간격이 일정한 구간 안에서는 cubic spline으로, 그 밖에서는 선형
+     보간으로 delay 사이의 값을 구합니다. 1.0.2까지 chirp 보정은 전체가 선형이어서
+     빠른 진동이 약해졌습니다(한 주기에 delay 8개: 파워가 평균 9%, 파장에 따라
+     0 ~ 14%). 그래서 chirp 보정을 거친 데이터는 1.0.2와 조금 다릅니다.
+     스크립트용: trspec.chirp에 delay_runs, spline_curv, interp_runs, chirp_shift.
+   - 이 기능들의 세부 사항: tail matching은 두 데이터의 잡음을 모두 고려하는 직교
+     회귀로 G를 구합니다. Anisotropy r view에서는 맵의 자동 색 범위가 -0.5 ... 0.5를 넘지
+     않습니다. 메인 창에서 빼기를 적용하거나 바꾸거나 없애면 Coherence 창의 용매
+     coherence 빼기는 꺼집니다.
+   - 이 기능들을 위한 데모 데이터: demo_solution.csv와 demo_solvent.csv
+     (측정된 그대로의 같은 쌍 demo_solution_raw.csv, demo_solvent_raw.csv 포함),
+     demo_aniso_par.csv와 demo_aniso_perp.csv (측정된 그대로의 같은 쌍
+     demo_aniso_raw_*.csv와, time zero가 0.05 ps 늦은 perpendicular 측정
+     demo_aniso_raw_perp_late.csv 포함), 그리고 demo_solvation.csv
+     (스펙트럼이 이동하는 time-resolved emission, 대역 피팅용). 순서와 기대되는
+     숫자는 README_demo.txt 에 있습니다.
+   - IRF 폭을 피팅하는 경우 (Fit trace, Global Analysis, Target Analysis):
+     FWHM이 delay 범위의 절반을 넘으면, delay 간격으로 정해지지 않는 폭과
+     마찬가지로 "폭을 잃었다"고 보고 두 단계(IRF 고정, 그다음 풀기)로 다시
+     피팅합니다. 전에는 시작값보다 훨씬 느린 decay(ns decay에 시작값 1 ps)에서
+     FWHM이 delay 범위까지 커지고 시간상수가 무의미한 값으로 끝날 수 있었습니다.
+     다시 해도 그대로이면 정해지지 않은 값으로 표시됩니다.
+   - Auto Analysis: Run 뒤의 상태 줄이, 정하지 못한 단계가 있으면 "No correction
+     was needed" 대신 그 단계 이름을 알려 줍니다("Not determined: chirp").
+   - 그림: Global Analysis 창의 map 세 개(Experimental, Global fit, Residual)
+     모두에 신호 이름이 붙은 color bar가 있습니다. Global fit map에는 전에
+     color bar가 없었습니다. 확대한 log y축에서 여섯 글자 이상이 되는 숫자는 공통 인수
+     (x 10^n)로 적어서, 축 이름이 그림 밖으로 밀려나지 않습니다. MCR-ALS 창의
+     convergence 그림은 LOF의 변화가 10배보다 작을 때 LOF 축에 숫자를 그대로
+     (1.37, 1.38) 적습니다. 전에는 이 숫자들이 왼쪽 끝에서 잘렸습니다.
+   - 그림의 행과 열: 그림이 여러 개인 모든 창에서, 같은 행의 그림은 위아래 끝이,
+     같은 열의 그림은 왼쪽 끝이 정확히 같습니다. color bar가 없는 그림은 map의
+     color bar 자리를 비워 두지 않습니다. Coherence, Target, Lifetime Density
+     Analysis 창, Global Analysis 창의 map 아래 행들, Auto Analysis 창의 Residual
+     탭에서 이런 그림의 오른쪽 여백은 y축 이름 왼쪽의 빈 공간과 비슷한 너비입니다.
+     다음 그림은 위나 아래의 map과 너비가 정확히 같게 남습니다: Lifetime Density
+     Analysis 창의 map 아래 스펙트럼(map과 파장 축이 같음), Time-Frequency 창의
+     map 아래 스펙트럼, SVD 창의 그림들, Auto Analysis 창 Corrections 탭의 그림들.
+     Components 탭의 DADS와 EADS는 너비가 같습니다.
+   Coherence 창의 per-pixel fit 잔차는 설정이 바뀔 때까지 보관됩니다. 이전 버전의
+   세션은 그대로 열립니다. 스크립트용으로 trspec.coherence에 coh_spectrum,
+   solvent_vc, solvent_shifted, solvent_band, fit_solvent_coherence가 추가되었습니다.
+
 1.0.2  (2026-11-22)
    번호를 붙인 첫 판입니다. 미리보기 12의 프로그램에, 기능이 같은 MATLAB판의
    번호를 붙였습니다. 화면과 보고서의 영어 글은 MATLAB판 1.0.2와 마찬가지로 미국식

@@ -9,7 +9,7 @@ from trspec.dataset import compute_ridge
 from .state import ui_str
 from .widgets import (FONT_PT, BlitManager, NumEdit, PlotCanvas, button,
                       colorButton, label, panel, sciTicks, styleAxes, tip)
-from .win_base import (BLUE, GREEN, Z_LABEL, ChildWindow, absMax, mapLayout,
+from .win_base import (BLUE, GREEN, ChildWindow, absMax, mapLayout,
                        mapOn)
 
 
@@ -50,8 +50,10 @@ class ChirpWindow(ChildWindow):
         gl.addWidget(self.cvMap, 1, 0)
         self.axMap = self.cvMap.figure.add_axes([0.1, 0.1, 0.75, 0.8])
         self.caxMap = self.cvMap.figure.add_axes([0.9, 0.1, 0.02, 0.8])
+        # (upper edge as the fit preview beside it, lower edge as the
+        # kinetics plot)
         self.cvMap.layoutFcn = lambda: mapLayout(self.cvMap, self.axMap,
-                                                 self.caxMap)
+                                                 self.caxMap, T=36.0, B=34.0)
         self.blit = BlitManager(self.cvMap)
         self.cvMap.mpl_connect('button_press_event', self.addPt)
         self.cvMap.mpl_connect('motion_notify_event', self.onChirpDrag)
@@ -168,7 +170,7 @@ class ChirpWindow(ChildWindow):
         self.axFit.set_ylabel(self._t0Label())
         self.axFit.set_title('Polynomial fit preview', fontsize=FONT_PT + 1)
         self.axKinP.set_xlabel('Delay time (%s)' % app.tUnitAx())
-        self.axKinP.set_ylabel(Z_LABEL)
+        self.axKinP.set_ylabel(self.app.sigName())
         self.axKinP.set_title('Kinetics at last-clicked %s' % app.xSym(),
                               fontsize=FONT_PT + 1)
 
@@ -366,7 +368,7 @@ class ChirpWindow(ChildWindow):
             tLo, tHi = float(app.delay[0]), float(app.delay[-1])
         ax.set_xlim(tLo, tHi)
         ax.set_xlabel('Delay time (%s)' % app.tUnitAx())
-        ax.set_ylabel(Z_LABEL)
+        ax.set_ylabel(self.app.sigName())
         ax.set_title('%s = %.1f %s' % (app.xSym(), app.wavelength[iw],
                                        app.xUnitAx()), fontsize=FONT_PT + 1)
         sciTicks(ax, 'y')

@@ -5,8 +5,9 @@ Port of fitSingleTrace of TRSpecAnalyzer.m.
 import numpy as np
 from ._optim import fminsearch
 from ._util import Result, lstsq_min_norm, as_row
-from .kinetics import (exp_irf_conv, irf_delay_step, irf_unresolved,
-                       irf_width_lost, stretched_irf_conv)
+from .kinetics import (exp_irf_conv, irf_delay_step, irf_too_wide,
+                       irf_unresolved, irf_width_lost,
+                       stretched_irf_conv)
 from .uncertainty import fit_param_uncertainty
 
 _EPS = np.finfo(float).eps
@@ -75,6 +76,9 @@ def fit_single_trace(t, y, tau_init, tau_fixed=False, beta_init=1.0, beta_fixed=
             fw_lo = min(fw_res, fwhm_init) * (1 - 1e-9)
             wall['on'] = fw_mode == 'limit'
 
+    # (a search that runs off overflows here and there; such values are
+    # rejected below, so the warnings of numpy are not shown)
+    @np.errstate(over='ignore', invalid='ignore', divide='ignore')
     def unpack(x):
         tau_c = tau_init.copy()
         beta_c = beta_init.copy()
@@ -185,11 +189,15 @@ def fit_single_trace(t, y, tau_init, tau_fixed=False, beta_init=1.0, beta_fixed=
                  fit=fit_vec, residual=res_vec, rms=rms, fval=fval,
                  exit_flag=exit_flag, iters=iters, mask=mask, irf_mode=irf_mode,
                  tau_std=tau_std, beta_std=beta_std, t0_std=t0_std, fwhm_std=fwhm_std,
-                 fwhm_lo=np.nan, fwhm_at_limit=False, irf_retry=0)
+                 fwhm_lo=np.nan, fwhm_at_limit=False, irf_retry=0,
+                 fwhm_hi=np.nan, fwhm_too_wide=False)
     if fwhm_free and fw_res > 0:
         res.fwhm_lo = fw_res
         res.fwhm_at_limit = irf_unresolved(fwhm_out, fw_res)
-    if fwhm_free and fw_mode == 'auto' and irf_width_lost(fwhm_out, fwhm_std, fw_res):
+    if fwhm_free:
+        res.fwhm_hi = 0.5 * t_span
+        res.fwhm_too_wide = irf_too_wide(fwhm_out, t_span)
+    if fwhm_free and fw_mode == 'auto' and irf_width_lost(fwhm_out, fwhm_std, fw_res, t_span):
         # the direct fit lost the IRF width: IRF fixed first, then all free
         fw_s0 = float(fwhm_init)
         if irf_unresolved(fwhm_init, fw_res):
@@ -203,7 +211,8 @@ def fit_single_trace(t, y, tau_init, tau_fixed=False, beta_init=1.0, beta_fixed=
                                   fwhm_fixed_arg, has_inf, irf_mode, t_range, 'limit')
             it_all = res.iters + s1.iters + s2.iters
             if (s2.fval < res.fval * (1 - 1e-6)
-                    or (res.fwhm_at_limit and s2.fval <= res.fval * (1 + 1e-6))):
+                    or ((res.fwhm_at_limit or res.fwhm_too_wide)
+                        and s2.fval <= res.fval * (1 + 1e-6))):
                 res = s2
                 res.irf_retry = 1
             else:

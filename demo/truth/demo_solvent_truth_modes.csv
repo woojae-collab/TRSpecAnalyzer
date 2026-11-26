@@ -1,0 +1,10 @@
+what,frequency_cm-1,amplitude_relative_to_801,damping_ps
+cyclohexane,384.1,0.0211,1.00
+cyclohexane,426.3,0.0316,1.00
+cyclohexane,801.3,1.0000,2.00
+cyclohexane,1028.3,0.1579,1.20
+cyclohexane,1157.6,0.0632,1.00
+cyclohexane,1266.4,0.1474,1.00
+cyclohexane,1444.4,0.1263,0.90
+solute,215.0,,1.20
+solute,590.0,,0.90

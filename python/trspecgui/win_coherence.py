@@ -6,14 +6,15 @@ import time
 import numpy as np
 from PySide6 import QtWidgets
 
-from trspec.coherence import compute_coherence, compute_time_frequency
+from trspec.coherence import (compute_coherence, compute_time_frequency,
+                              solvent_shifted, solvent_vc)
 from trspec.single import fit_single_trace
 
 from .state import ui_str
-from .textfit import setTitle
-from .widgets import (AX_BG, FONT_PT, BlitManager, NumEdit, PlotCanvas,
-                      VScroll, button, colorButton, label, panel, runBusy,
-                      sciTicks, sidePanel, styleAxes, textArea, tip)
+from .textfit import legend, setSpan, setTitle
+from .widgets import (AX_BG, FONT_PT, BlitManager, ElideLabel, NumEdit,
+                      PlotCanvas, VScroll, button, colorButton, label, panel,
+                      runBusy, sciTicks, sidePanel, styleAxes, textArea, tip)
 from .win_base import ChildWindow, mapLayout, openChild
 from .win_kinfit import numText, writeTable
 
@@ -22,6 +23,7 @@ RUN_COLOR_TF = (0.25, 0.55, 0.75)
 BLUE = (0.0, 0.0, 1.0)
 GREEN = (0.20, 0.55, 0.40)
 PURPLE = (0.55, 0.30, 0.70)
+GRAY = (0.62, 0.62, 0.62)           # "before the solvent subtraction"
 IDLE_TEXT = ['Click "Run Coherence" to compute the FFT map.']
 T_MAP = '|FFT|$^2$ map'
 T_PS = 'Power spectrum at clicked λ'
@@ -78,6 +80,10 @@ def setCombo(dd, key):
         dd.setCurrentIndex(i)
 
 
+R_PLAIN = 22.0    # room right of a plot without a color bar in a window
+#                   whose map has one (points)
+
+
 def lay1(cv, ax, L=58.0, B=34.0, R=16.0, T=22.0):
     W, H = cv.sizePt()
     cv.place(ax, L, B, W - L - R, H - B - T)
@@ -115,7 +121,42 @@ def writeMatrix(path, first, firstFmt, head, rows, dlm):
 
 def emptyCoh():
     return {'Pmap': None, 'freq': None, 'Rresid': None, 'tWin': None,
-            'RinWin': None, 'info': {}}
+            'RinWin': None, 'info': {}, 'before': None}
+
+
+def colorLims(P, lims, freq, logScale, zManual):
+    """(cLo, cHi, zLo, zHi): color limits of an |FFT|^2 map. zLo, zHi are
+    the limits in the units of the map; cLo, cHi those of what is drawn
+    (log10 of them with the log scale). Automatic: from 0 (log: four
+    decades below the top) to the largest value in the displayed nu range
+    lims; zManual = (lo, hi) is used as it is (log: a lower limit <= 0 is
+    replaced by four decades below the upper one)."""
+    Psub = P
+    if lims is not None:
+        fm = (freq >= lims[0]) & (freq <= lims[1])
+        if np.any(fm):
+            Psub = P[:, fm]
+    pk = nanmaxOr(Psub)
+    if not np.isfinite(pk) or pk <= 0:
+        pk = 1.0
+    if zManual is not None:
+        zLo, zHi = float(zManual[0]), float(zManual[1])
+        if logScale and zLo <= 0:
+            zLo = zHi * 1e-4
+    elif logScale:
+        zLo, zHi = pk * 1e-4, pk
+    else:
+        zLo, zHi = 0.0, pk
+    if logScale:
+        return np.log10(zLo), np.log10(zHi), zLo, zHi
+    return zLo, zHi, zLo, zHi
+
+
+def zRangeOk(lo, hi, logScale):
+    """Is (lo, hi) a usable color range?"""
+    if not (np.isfinite(lo) and np.isfinite(hi) and hi > lo):
+        return False
+    return (not logScale) or hi > 0
 
 
 class CoherenceWindow(ChildWindow):
@@ -129,6 +170,8 @@ class CoherenceWindow(ChildWindow):
         self.curFreq = np.nan
         self.xhV = self.xhH = self.yhAvgLo = self.yhAvgHi = None
         self.dragging = False
+        self.zManual = None         # color range set by hand: (lo, hi)
+        self.zUsed = (0.0, 1.0)     # color range of the map as drawn
         gl = QtWidgets.QHBoxLayout(self)
         gl.setContentsMargins(10, 10, 10, 10)
         gl.setSpacing(10)
@@ -173,6 +216,18 @@ class CoherenceWindow(ChildWindow):
             tooltip='Number of exponentials fitted at every wavelength. '
                     'Used by "Per-pixel exp fit" only.')
         self.lblNexp = pair('Per-pixel N exp:', self.edNexp)
+        r = QtWidgets.QHBoxLayout()
+        r.setSpacing(6)
+        self.btnSolv = button(
+            'Solvent coherence...',
+            tooltip='Take the vibrational coherence of the solvent, measured '
+                    'alone, out of the residual before the FFT.')
+        r.addWidget(self.btnSolv)
+        self.lblSolv = label('', color=(0.25, 0.25, 0.25))
+        r.addWidget(self.lblSolv, 1)
+        lv.addLayout(r)
+        # residual of the per-pixel fit, kept until its settings change
+        self.residCache = {'key': '', 'R': None, 'note': ''}
         bold('Time window:')
         self.edTMin = NumEdit(self.defaultTMin())
         self.edTMax = NumEdit(self.defaultTMax())
@@ -274,6 +329,55 @@ class CoherenceWindow(ChildWindow):
         grid.setContentsMargins(4, 0, 4, 2)
         grid.setSpacing(8)
         ro.addWidget(VScroll(rin))
+        # ---- bar above the plots: color range of the map; with a solvent
+        #      subtraction, what is compared with what -------------------
+        bar = QtWidgets.QWidget()
+        bh = QtWidgets.QHBoxLayout(bar)
+        bh.setContentsMargins(2, 0, 2, 0)
+        bh.setSpacing(6)
+        zTip = ('Color range of the |FFT|² map, in the units of the map '
+                '(also with the log scale). Type a value to fix the '
+                'range, for instance a small maximum to bring out weak '
+                'modes; "Auto" returns to the automatic range.')
+        self.lblZ = label('Color range:')
+        self.edZmin = NumEdit(0.0, width=78, tooltip=zTip)
+        self.edZmax = NumEdit(1.0, width=78, tooltip=zTip)
+        self.btnZAuto = button(
+            'Auto', width=54,
+            tooltip='Back to the automatic color range: up to the largest '
+                    'value of the map in the displayed ν range.')
+        bh.addWidget(self.lblZ)
+        bh.addWidget(self.edZmin)
+        bh.addWidget(label('to'))
+        bh.addWidget(self.edZmax)
+        bh.addWidget(self.btnZAuto)
+        bh.addSpacing(12)
+        self.lblShow = label('Map shows:')
+        self.ddShow = QtWidgets.QComboBox()
+        self.ddShow.addItem('After subtraction', 'after')
+        self.ddShow.addItem('Before subtraction', 'before')
+        self.ddShow.setToolTip(tip(
+            'The map after or before the solvent coherence was taken out. '
+            'Both are in the same units (those of the map after the '
+            'subtraction).'))
+        self.cbGray = QtWidgets.QCheckBox('"Before" in gray')
+        self.cbGray.setChecked(True)
+        self.cbGray.setToolTip(tip(
+            'Draw the curves before the solvent subtraction in gray '
+            'behind those after it, in the four plots at the right and '
+            'below.'))
+        self.btnCmp = button(
+            'Side by side...',
+            tooltip='Open a window with the map before and the map after '
+                    'the solvent subtraction side by side, on one color '
+                    'scale.')
+        for wd in (self.lblShow, self.ddShow, self.cbGray, self.btnCmp):
+            bh.addWidget(wd)
+        bh.addStretch(1)
+        self.cmpWidgets = (self.lblShow, self.ddShow, self.cbGray,
+                           self.btnCmp)
+        self.zWidgets = (self.lblZ, self.edZmin, self.edZmax)
+        grid.addWidget(bar, 0, 0, 1, 2)
         self.cvMap = PlotCanvas()
         self.cvP = PlotCanvas()
         self.cvProf = PlotCanvas()
@@ -282,12 +386,13 @@ class CoherenceWindow(ChildWindow):
         self.cvP.setMinimumHeight(250)
         self.cvProf.setMinimumHeight(215)
         self.cvRes.setMinimumHeight(215)
-        grid.addWidget(self.cvMap, 0, 0)
-        grid.addWidget(self.cvP, 0, 1)
-        grid.addWidget(self.cvProf, 1, 0)
-        grid.addWidget(self.cvRes, 1, 1)
-        grid.setRowStretch(0, 13)
-        grid.setRowStretch(1, 10)
+        grid.addWidget(self.cvMap, 1, 0)
+        grid.addWidget(self.cvP, 1, 1)
+        grid.addWidget(self.cvProf, 2, 0)
+        grid.addWidget(self.cvRes, 2, 1)
+        grid.setRowStretch(0, 0)
+        grid.setRowStretch(1, 13)
+        grid.setRowStretch(2, 10)
         grid.setColumnStretch(0, 1)
         grid.setColumnStretch(1, 1)
         self.axMap = self.cvMap.figure.add_subplot(111)
@@ -298,11 +403,15 @@ class CoherenceWindow(ChildWindow):
         self.axProfPh = self.cvProf.figure.add_subplot(212)
         self.axRes = self.cvRes.figure.add_subplot(111)
         self.cvMap.layoutFcn = self._layMap
+        # (the plots without a color bar do not leave its room free:
+        # the room right of them, R_PLAIN, is about as wide as the
+        # blank left of the label of their y-axis)
         self.cvP.layoutFcn = lambda: layStack(
-            self.cvP, self.axPSpec, self.axPSpecAvg, 26.0)
+            self.cvP, self.axPSpec, self.axPSpecAvg, 26.0, R=R_PLAIN)
         self.cvProf.layoutFcn = lambda: layStack(
-            self.cvProf, self.axProf, self.axProfPh, 10.0)
-        self.cvRes.layoutFcn = lambda: lay1(self.cvRes, self.axRes)
+            self.cvProf, self.axProf, self.axProfPh, 10.0, R=R_PLAIN)
+        self.cvRes.layoutFcn = lambda: lay1(self.cvRes, self.axRes,
+                                            R=R_PLAIN)
         self.blMap = BlitManager(self.cvMap)
         self.cvMap.mpl_connect('button_press_event', self.onMapPress)
         self.cvMap.mpl_connect('motion_notify_event', self.onMapMotion)
@@ -320,6 +429,8 @@ class CoherenceWindow(ChildWindow):
                                  'Time-frequency'))
         self.ddResid.currentIndexChanged.connect(
             lambda *_: self.safe(self.syncNexpEnable, 'Method'))
+        self.btnSolv.clicked.connect(
+            lambda *_: self.safe(self.openSolventDialog, 'Solvent coherence'))
         self.ddYScale.currentIndexChanged.connect(
             lambda *_: self._user(self.onYScaleChange))
         self.edAvgWLmin.valueChanged.connect(
@@ -338,6 +449,18 @@ class CoherenceWindow(ChildWindow):
             lambda *_: self.safe(self.exportAvg, 'Export avg spec'))
         self.btnExpProf.clicked.connect(
             lambda *_: self.safe(self.exportProf, 'Export profile'))
+        self.edZmin.valueChanged.connect(
+            lambda *_: self._user(self.onZRange))
+        self.edZmax.valueChanged.connect(
+            lambda *_: self._user(self.onZRange))
+        self.btnZAuto.clicked.connect(
+            lambda *_: self.safe(self.onZAuto, 'Color range'))
+        self.ddShow.currentIndexChanged.connect(
+            lambda *_: self._user(self.onShowChange))
+        self.cbGray.toggled.connect(
+            lambda *_: self._user(self.onGrayChange))
+        self.btnCmp.clicked.connect(
+            lambda *_: self.safe(self.openCompare, 'Side by side'))
 
         # ---- result of an earlier visit --------------------------------
         self._quiet = True
@@ -361,17 +484,32 @@ class CoherenceWindow(ChildWindow):
                 self.edAvgWLmax.setValue(st['avgHi'])
                 self.edDispVmin.setValue(st['dispLo'])
                 self.edDispVmax.setValue(st['dispHi'])
+                # (settings of version 1.1.0: absent in older sessions)
+                zLo, zHi = st.get('zLo'), st.get('zHi')
+                if zLo is not None and zHi is not None and \
+                        zRangeOk(float(zLo), float(zHi), False):
+                    self.zManual = (float(zLo), float(zHi))
+                setCombo(self.ddShow, st.get('mapShows', 'after'))
+                self.cbGray.setChecked(bool(st.get('grayBefore', True)))
                 r0 = sv['result']
                 info = dict(r0['info'])
                 if info.get('Phimap') is not None:
                     info['Phimap'] = np.asarray(info['Phimap'], float)
+                bef = r0.get('before')
+                if isinstance(bef, dict) and bef.get('Pmap') is not None \
+                        and np.shape(bef['Pmap']) == np.shape(r0['Pmap']):
+                    bef = {'Pmap': np.asarray(bef['Pmap'], float),
+                           'RinWin': np.asarray(bef['RinWin'], float),
+                           'Phimap': np.asarray(bef['Phimap'], float)}
+                else:
+                    bef = None
                 self.res = {
                     'Pmap': np.asarray(r0['Pmap'], float),
                     'freq': np.asarray(r0['freq'], float).ravel(),
                     'Rresid': np.asarray(r0['Rresid'], float),
                     'tWin': np.asarray(r0['tWin'], float).ravel(),
                     'RinWin': np.asarray(r0['RinWin'], float),
-                    'info': info}
+                    'info': info, 'before': bef}
                 cl, cf = sv['curLambda'], sv['curFreq']
                 self.curLambda = np.nan if cl is None else float(cl)
                 self.curFreq = np.nan if cf is None else float(cf)
@@ -381,12 +519,23 @@ class CoherenceWindow(ChildWindow):
                 self.txtResult.setPlainText('\n'.join(sv['lines']))
             except Exception:
                 self.res = emptyCoh()
+                self.zManual = None
                 self._setExport(False)
                 self._emptyPlots()
                 self.lblStatus.setText(
                     'Stored result could not be restored -- run again.')
         self._quiet = False
         self.syncNexpEnable()
+        self.updateSolvLabel()
+        self.syncBar()
+
+    def onClosed(self):
+        w = self.app.childWindows.get('cohcmp')
+        if w is not None:
+            try:
+                w.close()
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------
     def _user(self, fcn):
@@ -401,6 +550,111 @@ class CoherenceWindow(ChildWindow):
         for b in (self.btnExpMap, self.btnExpSpec, self.btnExpAvg,
                   self.btnExpProf, self.btnTF):
             b.setEnabled(bool(on))
+
+    # ---- the bar above the plots --------------------------------------
+    def hasBefore(self):
+        """Is there a result from before the solvent subtraction?"""
+        b = self.res.get('before')
+        return self.res['Pmap'] is not None and isinstance(b, dict) \
+            and b.get('Pmap') is not None
+
+    def showBefore(self):
+        """Does the map show the result before the subtraction?"""
+        return self.hasBefore() and self.ddShow.currentData() == 'before'
+
+    def grayOn(self):
+        return self.hasBefore() and self.cbGray.isChecked()
+
+    def mapShown(self):
+        """The |FFT|^2 map on display."""
+        if self.showBefore():
+            return self.res['before']['Pmap']
+        return self.res['Pmap']
+
+    def syncBar(self):
+        """The bar follows the result: the color range needs a map, the
+        comparison a result from before the solvent subtraction."""
+        has = self.res['Pmap'] is not None
+        for wd in self.zWidgets:
+            wd.setEnabled(has)
+        self.btnZAuto.setEnabled(has and self.zManual is not None)
+        on = self.hasBefore()
+        for wd in self.cmpWidgets:
+            wd.setVisible(on)
+        if not on:
+            if self.ddShow.currentData() != 'after':
+                q, self._quiet = self._quiet, True
+                try:
+                    setCombo(self.ddShow, 'after')
+                finally:
+                    self._quiet = q
+            w = self.app.childWindows.get('cohcmp')
+            if w is not None:
+                try:
+                    w.close()
+                except Exception:
+                    pass
+
+    def saveView(self):
+        """Keep what the bar says with the stored result."""
+        sv = self.app.cohSaved
+        if isinstance(sv, dict) and isinstance(sv.get('settings'), dict):
+            sv['settings'].update(self.viewSettings())
+
+    def viewSettings(self):
+        zm = self.zManual
+        return {'zLo': None if zm is None else float(zm[0]),
+                'zHi': None if zm is None else float(zm[1]),
+                'mapShows': self.ddShow.currentData(),
+                'grayBefore': bool(self.cbGray.isChecked())}
+
+    def onZRange(self):
+        """A limit of the color range was typed."""
+        if self.res['Pmap'] is None:
+            return
+        lo, hi = self.edZmin.value(), self.edZmax.value()
+        logS = self.ddYScale.currentData() == 'log'
+        if not zRangeOk(lo, hi, logS):
+            self.edZmin.setValue(self.zUsed[0])
+            self.edZmax.setValue(self.zUsed[1])
+            self.lblStatus.setText(
+                'Color range: the maximum has to be larger than the '
+                'minimum%s.' % (' and positive' if logS else ''))
+            return
+        self.zManual = (float(lo), float(hi))
+        self.plotMap()
+        self.saveView()
+
+    def onZAuto(self):
+        self.zManual = None
+        if self.res['Pmap'] is not None:
+            self.plotMap()
+        self.syncBar()
+        self.saveView()
+
+    def onShowChange(self):
+        if self.res['Pmap'] is not None:
+            self.plotMap()
+        self.saveView()
+
+    def onGrayChange(self):
+        if self.res['Pmap'] is not None:
+            self.update1Ds()
+        self.saveView()
+
+    def openCompare(self):
+        if not self.hasBefore():
+            return None
+        return openChild(self.app, CompareWindow, self)
+
+    def refreshCompare(self, cursorOnly=False):
+        """The side-by-side window follows this one."""
+        w = self.app.childWindows.get('cohcmp')
+        if w is not None:
+            try:
+                w.refresh(cursorOnly)
+            except RuntimeError:
+                pass
 
     def _emptyPlots(self):
         app = self.app
@@ -435,6 +689,9 @@ class CoherenceWindow(ChildWindow):
         self._layMap()
         for cv in (self.cvMap, self.cvP, self.cvProf, self.cvRes):
             cv.draw_idle()
+        self.zUsed = (0.0, 1.0)
+        self.edZmin.setValue(0.0)
+        self.edZmax.setValue(1.0)
 
     def syncNexpEnable(self):
         on = self.ddResid.currentData() == 'pixfit'
@@ -497,6 +754,7 @@ class CoherenceWindow(ChildWindow):
             self.yhAvgHi.set_ydata([v, v])
         self.blMap.update()
         self.update1Ds()
+        self.refreshCompare()
 
     def onDispRangeChange(self):
         if self.res['Pmap'] is None:
@@ -504,6 +762,104 @@ class CoherenceWindow(ChildWindow):
         self.plotResults()
 
     # ---- residual ----------------------------------------------------
+    def getOpts(self):
+        """FFT settings as set in the window (keywords of
+        compute_coherence, without the normalization)."""
+        return {'t_min': self.edTMin.value(), 't_max': self.edTMax.value(),
+                'apod': self.ddApod.currentData(),
+                'zero_pad': int(round(self.edZpad.value())),
+                'detrend': self.ddDet.currentData(),
+                'freq_unit': self.ddFreqU.currentData(),
+                'time_unit': self.app.timeUnit}
+
+    def getResidual(self):
+        """(R, note): residual of the method chosen. The per-pixel fit
+        takes long: its result is kept until its settings change (the
+        window closes when the data change)."""
+        app = self.app
+        mth = self.ddResid.currentData()
+        nEx = int(round(self.edNexp.value()))
+        if mth != 'pixfit':
+            return self.computeResidual(mth, nEx)
+        t0k = app.gaResultT0 if app.gaResultT0 is not None else app.gaT0
+        fwk = app.gaResultFWHM if app.gaResultFWHM is not None \
+            else app.gaFWHM
+        key = 'pixfit|%d|%r|%r' % (nEx, t0k, fwk)
+        c = self.residCache
+        if c['key'] == key and c['R'] is not None \
+                and c['R'].shape == app.deltaA.shape:
+            return c['R'], c['note']
+        R, note = self.computeResidual(mth, nEx)
+        self.residCache = {'key': key, 'R': R, 'note': note}
+        return R, note
+
+    def updateSolvLabel(self):
+        """State of the solvent subtraction, beside its button."""
+        app = self.app
+        if app.solvData:
+            self.lblSolv.setText(
+                'out of the data in this view: A = %.4g, shift %.4g %s' % (
+                    app.solvDataA, app.solvDataShift, app.tUnitTxt()))
+        elif app.solvOn:
+            self.lblSolv.setText('A = %.4g, shift %.4g %s' % (
+                app.solvA, app.solvShift, app.tUnitTxt()))
+        elif app.refOrig is not None:
+            self.lblSolv.setText('not subtracted')
+        else:
+            self.lblSolv.setText('no solvent data')
+
+    def solvPad(self):
+        """Shift the solvent coherence is prepared for."""
+        app = self.app
+        ms = abs(app.solvMaxShift) if np.isfinite(app.solvMaxShift) else 0.0
+        return max(ms, abs(app.solvShift))
+
+    def openSolventDialog(self):
+        app = self.app
+        if self.edTMin.value() >= self.edTMax.value():
+            self.alert('Need t_min < t_max.', 'Invalid')
+            return None
+        ok, why = app.solvAllowed()
+        if not ok:
+            self.alert(why, 'Solvent coherence')
+            return None
+        if app.solvData:
+            self.alert('In this view the solvent is out of the data already '
+                       '(A = %.4g, time shift %.4g %s). Factor and time shift '
+                       'are set in the view "Data": choose it in the main '
+                       'window ("View"), change them in this dialog there '
+                       'and press Apply.'
+                       % (app.solvDataA, app.solvDataShift, app.tUnitTxt()),
+                       'Solvent coherence')
+            return None
+        tA = np.asarray(app.delay, float).ravel()
+        if np.count_nonzero((tA >= self.edTMin.value())
+                            & (tA <= self.edTMax.value())) < 8:
+            self.alert('The time window holds fewer than 8 delays.',
+                       'Solvent coherence')
+            return None
+        from .win_solvent import SolventDialog
+        dlg = SolventDialog(self)
+        self.solventDlg = dlg
+        if app.headless:
+            dlg.show()
+        else:
+            dlg.exec()
+        return dlg
+
+    def rerunQuiet(self):
+        """Run again for the solvent dialog. A failure is returned as
+        text: that dialog is modal, an alert in this window could not be
+        answered."""
+        em = ''
+        try:
+            self.doRun()
+        except Exception as err:        # noqa: BLE001 (shown to the user)
+            em = str(err)
+            self.lblStatus.setText('Failed.')
+        self.updateSolvLabel()
+        return em
+
     def computeResidual(self, method, Nexp):
         """(R, note): the oscillating part of the data."""
         app = self.app
@@ -576,18 +932,66 @@ class CoherenceWindow(ChildWindow):
                                    % app.deltaA.shape[0])
         else:
             self.lblStatus.setText('Computing residual...')
+        self.updateSolvLabel()
         box = {}
 
         def work():
-            R, note = self.computeResidual(method, Nexp)
+            R, note = self.getResidual()
+            # Rbef: the residual as it was before the solvent coherence
+            # was taken out (shown beside the result). What was taken out
+            # of the data of the main window is put back for it.
+            Rbef = None
+            box['solv'] = box['solvD'] = ''
+            if app.solvData:
+                Sd = np.asarray(app.solventInData(), float)
+                if Sd.shape == R.shape and np.any(np.isfinite(Sd)
+                                                  & (Sd != 0)):
+                    Rbef = R + Sd
+                box['solvD'] = ('Solvent %s out of the data: A = %.4g, '
+                                'shift %.4g %s' % (
+                                    'signal' if app.solvView == 'all'
+                                    else 'coherence',
+                                    app.solvDataA, app.solvDataShift,
+                                    app.tUnitTxt()))
+            # the vibrational coherence of the solvent, measured alone,
+            # is taken out of the residual before the FFT
+            if app.solvOn and not app.solvData:
+                if app.solvAllowed()[0] and app.refStage is not None \
+                        and app.refStage.shape == R.shape:
+                    Vs = solvent_vc(app.solventData(), app.delay, tMin, tMax,
+                                    self.solvPad())
+                    if Rbef is None:
+                        Rbef = R
+                    R = R - app.solvA * solvent_shifted(Vs, app.delay,
+                                                        app.solvShift)
+                    box['solv'] = 'Solvent: A = %.4g, shift %.4g %s' % (
+                        app.solvA, app.solvShift, app.tUnitTxt())
+                    # (the solvent views of the main window take out what
+                    # is subtracted here; told to the app after the work)
+                    box['def'] = (app.solvA, app.solvShift, [tMin, tMax],
+                                  self.solvPad())
+                else:
+                    box['solv'] = 'Solvent: NOT subtracted (no usable data)'
+                    box['def'] = None
             t0 = time.time()
             o = compute_coherence(R, app.delay, tMin, tMax, apod, zpad, det,
                                   fu, nrm, tU)
+            ob = None
+            if Rbef is not None:
+                # same settings; put on the scale of the map above below
+                ob = compute_coherence(Rbef, app.delay, tMin, tMax, apod,
+                                       zpad, det, fu, 'none', tU)
             box['el'] = time.time() - t0
+            box['ob'], box['Rbef'] = ob, Rbef
             return R, note, o
 
         Rresid, residNote, o = runBusy(app, self, 'Computing FFT map...',
                                        work)
+        if 'def' in box:
+            if box['def'] is None:
+                app.clearSolvDef()
+            else:
+                app.setSolvDef(*box['def'])
         elapsed = box.get('el', 0.0)
         tA = np.asarray(app.delay, float).ravel()
         mask = (tA >= tMin) & (tA <= tMax)
@@ -598,11 +1002,22 @@ class CoherenceWindow(ChildWindow):
                 'apod': apod, 'zeroPad': int(o.zero_pad), 'detrend': det,
                 'freqUnit': fu, 'normMode': nrm,
                 'Phimap': np.asarray(o.phase, float)}
+        before = None
+        if box.get('ob') is not None:
+            # the map before the subtraction, in the units of the map
+            # after it (divided by the same normalization)
+            with np.errstate(divide='ignore', invalid='ignore'):
+                Pb = np.asarray(box['ob'].pmap, float) / o.norm_scale
+            Pb[~np.isfinite(Pb)] = 0
+            before = {'Pmap': Pb,
+                      'RinWin': np.asarray(box['Rbef'], float)[:, mask],
+                      'Phimap': np.asarray(box['ob'].phase, float)}
         self.res = {'Pmap': Pmap, 'freq': freq,
                     'Rresid': np.asarray(Rresid, float), 'tWin': tA[mask],
                     'RinWin': np.asarray(Rresid, float)[:, mask],
-                    'info': info}
+                    'info': info, 'before': before}
         self._setExport(True)
+        self.syncBar()
         app.tfSaved = None
         w = app.childWindows.get('tf')
         if w is not None:
@@ -615,6 +1030,10 @@ class CoherenceWindow(ChildWindow):
         L = ['Residual: %s' % method]
         if residNote:
             L.append(residNote)
+        if box.get('solvD'):
+            L.append(box['solvD'])
+        if box.get('solv'):
+            L.append(box['solv'])
         L += ['Window: %.4g .. %.4g %s' % (tMin, tMax, app.tUnitTxt()),
               'dt (uniform): %.4g %s' % (info['dtUni'], app.tUnitTxt()),
               'Nfft: %d  (input %d)' % (info['Nfft'], info['Nwin']),
@@ -641,35 +1060,40 @@ class CoherenceWindow(ChildWindow):
                 'avgHi': self.edAvgWLmax.value(),
                 'dispLo': self.edDispVmin.value(),
                 'dispHi': self.edDispVmax.value()}}
+        app.cohSaved['settings'].update(self.viewSettings())
 
     def plotResults(self):
+        """The map, the four curve plots and the side-by-side window."""
+        if self.res['Pmap'] is None:
+            return
+        self.plotMap()
+        self.update1Ds()
+        self.refreshCompare()
+
+    def plotMap(self):
         app = self.app
         r = self.res
         if r['Pmap'] is None:
             return
         wl = np.asarray(app.wavelength, float).ravel()
-        freq, Pmap = r['freq'], r['Pmap']
-        lims = self.getDispLims()
-        Psub = Pmap
-        if lims is not None:
-            fm = (freq >= lims[0]) & (freq <= lims[1])
-            if np.any(fm):
-                Psub = Pmap[:, fm]
-        if self.ddYScale.currentData() == 'log':
-            pk = nanmaxOr(Psub)
-            if not np.isfinite(pk) or pk <= 0:
-                pk = 1.0
-            floorVal = pk * 1e-4
-            Cdat = np.log10(np.maximum(Pmap, floorVal))
-            cLo, cHi = np.log10(floorVal), np.log10(pk)
+        freq = r['freq']
+        Pmap = self.mapShown()          # after or before the subtraction
+        logS = self.ddYScale.currentData() == 'log'
+        zm = self.zManual
+        if zm is not None and not zRangeOk(zm[0], zm[1], logS):
+            zm = None                   # (not usable with this scale)
+        cLo, cHi, zLo, zHi = colorLims(Pmap, self.getDispLims(), freq, logS,
+                                       zm)
+        self.zUsed = (zLo, zHi)
+        self.edZmin.setValue(zLo)
+        self.edZmax.setValue(zHi)
+        self.btnZAuto.setEnabled(self.zManual is not None)
+        if logS:
+            Cdat = np.log10(np.maximum(Pmap, zLo))
             cbLabel = 'log$_{10}$|FFT|$^2$'
         else:
             Cdat = Pmap
             cbLabel = P_LABEL
-            cl = nanmaxOr(Psub)
-            if not np.isfinite(cl) or cl <= 0:
-                cl = 1.0
-            cLo, cHi = 0.0, cl
         ax, cax = self.axMap, self.caxMap
         ax.clear()
         cax.clear()
@@ -685,19 +1109,26 @@ class CoherenceWindow(ChildWindow):
         ax.set_ylim(float(np.min(wl)), float(np.max(wl)))
         ax.set_xlabel(freqAxLabel(r['info']['freqUnit']))
         ax.set_ylabel(app.xAxLabel())
-        setTitle(ax, T_MAP)
+        if not self.hasBefore():
+            setTitle(ax, T_MAP)
+        elif self.showBefore():
+            setTitle(ax, T_MAP + ' (before the solvent subtraction)',
+                     T_MAP + ' (before subtraction)', T_MAP + ' (before)')
+        else:
+            setTitle(ax, T_MAP + ' (after the solvent subtraction)',
+                     T_MAP + ' (after subtraction)', T_MAP + ' (after)')
         cax.set_visible(h is not None)
         if h is not None:
             cb = self.cvMap.figure.colorbar(h, cax=cax)
             cb.set_label(cbLabel, fontsize=FONT_PT)
             cb.ax.tick_params(labelsize=FONT_PT, length=3)
-            if self.ddYScale.currentData() != 'log':
+            if not logS:
                 sciTicks(cb.ax, 'y')
         if not np.isfinite(self.curLambda):
             self.curLambda = 0.5 * (float(np.min(wl)) + float(np.max(wl)))
         if not np.isfinite(self.curFreq):
-            col = np.nanmax(np.where(np.isfinite(Pmap), Pmap, -np.inf),
-                            axis=0)
+            Pa = r['Pmap']              # (the result: after the subtraction)
+            col = np.nanmax(np.where(np.isfinite(Pa), Pa, -np.inf), axis=0)
             self.curFreq = float(freq[int(np.argmax(col))])
         kw = dict(color='k', linewidth=1.0, alpha=0.7)
         self.xhV = ax.axvline(self.curFreq, **kw)
@@ -710,7 +1141,6 @@ class CoherenceWindow(ChildWindow):
                                self.yhAvgHi])
         self._layMap()
         self.cvMap.draw_idle()
-        self.update1Ds()
 
     # ---- the point picked on the map ---------------------------------
     def onMapPress(self, ev):
@@ -746,6 +1176,7 @@ class CoherenceWindow(ChildWindow):
             self.xhH.set_ydata([self.curLambda, self.curLambda])
         self.blMap.update()
         self.update1Ds()
+        self.refreshCompare(True)
 
     def avgRange(self):
         lo = min(self.edAvgWLmin.value(), self.edAvgWLmax.value())
@@ -753,9 +1184,10 @@ class CoherenceWindow(ChildWindow):
         wl = np.asarray(self.app.wavelength, float).ravel()
         return lo, hi, (wl >= lo) & (wl <= hi)
 
-    def avgSpectrum(self):
+    def avgSpectrum(self, P=None):
         lo, hi, inR = self.avgRange()
-        P = self.res['Pmap']
+        if P is None:
+            P = self.res['Pmap']
         if np.any(inR):
             with np.errstate(invalid='ignore'):
                 Pavg = np.nanmean(P[inR, :], axis=0)
@@ -776,11 +1208,23 @@ class CoherenceWindow(ChildWindow):
         ysc = self.ddYScale.currentData()
         xl = self.getXlimForFreq(freq)
         dash = dict(color='k', linestyle='--', linewidth=0.8, alpha=0.6)
+        # before the solvent subtraction: gray, behind the result
+        bef = r['before'] if self.grayOn() else None
+        kg = dict(color=GRAY, linewidth=1.3, zorder=1.5, label='before')
+
+        def twoLegend(ax, hB, hA):
+            hA.set_label('after')
+            if hB is not None:
+                legend(ax, handles=[hB, hA], fontsize=FONT_PT)
 
         ax = self.axPSpec
         ax.clear()
         styleAxes(ax, grid=True)
-        ax.plot(freq, Pmap[iw, :], '-', color=BLUE, linewidth=1.4)
+        hB = None
+        if bef is not None:
+            hB, = ax.plot(freq, bef['Pmap'][iw, :], '-', **kg)
+        hA, = ax.plot(freq, Pmap[iw, :], '-', color=BLUE, linewidth=1.4)
+        twoLegend(ax, hB, hA)
         ax.axvline(fqAct, **dash)
         ax.set_xlim(xl[0], xl[1])
         ax.set_ylabel(P_LABEL)
@@ -795,7 +1239,11 @@ class CoherenceWindow(ChildWindow):
         ax.clear()
         styleAxes(ax, grid=True)
         Pavg, lo, hi, inR = self.avgSpectrum()
-        ax.plot(freq, Pavg, '-', color=GREEN, linewidth=1.4)
+        hB = None
+        if bef is not None:
+            hB, = ax.plot(freq, self.avgSpectrum(bef['Pmap'])[0], '-', **kg)
+        hA, = ax.plot(freq, Pavg, '-', color=GREEN, linewidth=1.4)
+        twoLegend(ax, hB, hA)
         ax.axvline(fqAct, **dash)
         ax.set_xlim(xl[0], xl[1])
         ax.set_xlabel(freqAxLabel(r['info']['freqUnit']))
@@ -812,7 +1260,11 @@ class CoherenceWindow(ChildWindow):
         ax = self.axProf
         ax.clear()
         styleAxes(ax, grid=True)
-        ax.plot(wl, Pmap[:, ifq], '-', color=BLUE, linewidth=1.4)
+        hB = None
+        if bef is not None:
+            hB, = ax.plot(wl, bef['Pmap'][:, ifq], '-', **kg)
+        hA, = ax.plot(wl, Pmap[:, ifq], '-', color=BLUE, linewidth=1.4)
+        twoLegend(ax, hB, hA)
         ax.axvline(wlAct, **dash)
         ax.set_xlim(float(np.min(wl)), float(np.max(wl)))
         ax.set_ylabel(P_LABEL)
@@ -826,6 +1278,13 @@ class CoherenceWindow(ChildWindow):
         styleAxes(ax, grid=True)
         Phi = r['info'].get('Phimap')
         if Phi is not None and np.size(Phi):
+            if bef is not None:
+                # (masked like the result: below 5 % of its own column)
+                phB = np.array(bef['Phimap'][:, ifq], float)
+                pkB = nanmaxOr(bef['Pmap'][:, ifq])
+                if np.isfinite(pkB) and pkB > 0:
+                    phB[bef['Pmap'][:, ifq] < 0.05 * pkB] = np.nan
+                ax.plot(wl, phB, '-', **dict(kg, label='_before'))
             ph = np.array(Phi[:, ifq], float)
             pk = nanmaxOr(Pmap[:, ifq])
             if np.isfinite(pk) and pk > 0:
@@ -844,7 +1303,12 @@ class CoherenceWindow(ChildWindow):
         ax = self.axRes
         ax.clear()
         styleAxes(ax, grid=True)
-        ax.plot(r['tWin'], r['RinWin'][iw, :], 'k-', linewidth=1.0)
+        hB = None
+        if bef is not None:
+            hB, = ax.plot(r['tWin'], bef['RinWin'][iw, :], '-',
+                          **dict(kg, linewidth=1.0))
+        hA, = ax.plot(r['tWin'], r['RinWin'][iw, :], 'k-', linewidth=1.0)
+        twoLegend(ax, hB, hA)
         ax.axhline(0, color='k', linestyle=':', linewidth=0.8)
         ax.set_xlabel('Delay time (%s)' % app.tUnitAx())
         ax.set_ylabel('Residual')
@@ -872,11 +1336,15 @@ class CoherenceWindow(ChildWindow):
             self.edAvgWLmax.setValue(self.wlHi0)
             self.edDispVmin.setValue(0.0)
             self.edDispVmax.setValue(0.0)
+            setCombo(self.ddShow, 'after')
+            self.cbGray.setChecked(True)
         finally:
             self._quiet = False
         self.res = emptyCoh()
+        self.zManual = None
         self.curFreq = np.nan
         self._setExport(False)
+        self.syncBar()
         app.tfSaved = None
         w = app.childWindows.get('tf')
         if w is not None:
@@ -888,20 +1356,30 @@ class CoherenceWindow(ChildWindow):
         self.lblStatus.setText('Reset.')
         self.txtResult.setPlainText('\n'.join(IDLE_TEXT))
         app.cohSaved = None
+        if not app.solvData:
+            # (in a solvent view the subtraction belongs to the view
+            # "Data" and stays)
+            app.solvOn = False
+            app.clearSolvDef()
+        self.updateSolvLabel()
 
     # ---- exports -----------------------------------------------------
     def exportMap(self):
+        """The map on display: after the solvent subtraction, or before
+        it ("Map shows")."""
         app, r = self.app, self.res
         if r['Pmap'] is None:
             return
+        Pexp = self.mapShown()
         full = app.putFile('CSV (*.csv);;DAT (tab) (*.dat)',
-                           'Export |FFT|² map', 'coherence_map.csv',
-                           parent=self)
+                           'Export |FFT|² map',
+                           'coherence_map_before.csv' if self.showBefore()
+                           else 'coherence_map.csv', parent=self)
         if not full:
             return
         dlm = ',' if full.lower().endswith('.csv') else '\t'
         try:
-            rows = np.column_stack([r['freq'], r['Pmap'].T])
+            rows = np.column_stack([r['freq'], Pexp.T])
             writeMatrix(full, 'wavenumber_%s' % r['info']['freqUnit'],
                         '%.6g', np.ravel(app.wavelength), rows, dlm)
             self.inform('Saved: %s' % full, 'Exported')
@@ -914,8 +1392,12 @@ class CoherenceWindow(ChildWindow):
             return
         wl = np.asarray(app.wavelength, float).ravel()
         iw = int(np.argmin(np.abs(wl - self.curLambda)))
-        exportTable(self, [r['freq'], r['Pmap'][iw, :]],
-                    ['nu_%s' % r['info']['freqUnit'], 'power'],
+        cols = [r['freq'], r['Pmap'][iw, :]]
+        hdr = ['nu_%s' % r['info']['freqUnit'], 'power']
+        if self.grayOn():               # (the gray curve of the plot)
+            cols.append(r['before']['Pmap'][iw, :])
+            hdr.append('power_before')
+        exportTable(self, cols, hdr,
                     'coherence_Pnu_%.0f%s' % (wl[iw], app.xUnitTxt()),
                     'Export power spectrum')
 
@@ -928,8 +1410,12 @@ class CoherenceWindow(ChildWindow):
             self.alert('No wavelengths fall inside the current averaging '
                        'range.', 'Empty range')
             return
-        exportTable(self, [r['freq'], Pavg],
-                    ['nu_%s' % r['info']['freqUnit'], 'power_avg'],
+        cols = [r['freq'], Pavg]
+        hdr = ['nu_%s' % r['info']['freqUnit'], 'power_avg']
+        if self.grayOn():
+            cols.append(self.avgSpectrum(r['before']['Pmap'])[0])
+            hdr.append('power_avg_before')
+        exportTable(self, cols, hdr,
                     'coherence_avgPnu_%.0f-%.0f%s' % (lo, hi,
                                                       app.xUnitTxt()),
                     'Export averaged power spectrum')
@@ -946,11 +1432,270 @@ class CoherenceWindow(ChildWindow):
         if Phi is not None and np.size(Phi):
             cols.append(Phi[:, ifq])
             hdr.append('phase_rad')
+        if self.grayOn():
+            cols.append(r['before']['Pmap'][:, ifq])
+            hdr.append('power_before')
+            if np.size(r['before'].get('Phimap')):
+                cols.append(r['before']['Phimap'][:, ifq])
+                hdr.append('phase_before_rad')
         exportTable(self, cols, hdr, 'coherence_profile_%.0f%s' % (
             freq[ifq], r['info']['freqUnit']), 'Export spectral profile')
 
 
 # ======================================================================
+class CompareWindow(ChildWindow):
+    """The |FFT|^2 map before and after the solvent subtraction side by
+    side on one color scale, with the two power spectra laid over each
+    other. It shows the result of the Coherence window and follows it:
+    cursor, displayed nu range, lambda range of the average, scale."""
+    KEY = 'cohcmp'
+
+    def __init__(self, app, coh):
+        super().__init__(app, 'Coherence: before / after the solvent '
+                         'subtraction', 1180, 760)
+        self.coh = coh
+        self.zManual = None
+        self.zUsed = (0.0, 1.0)
+        self.dragging = False
+        self.lines = []
+        v = QtWidgets.QVBoxLayout(self)
+        v.setContentsMargins(10, 8, 10, 8)
+        v.setSpacing(6)
+        bh = QtWidgets.QHBoxLayout()
+        bh.setSpacing(6)
+        zTip = ('Color range of both maps, in the units of the map of the '
+                'Coherence window. Type a value to fix the range; "Auto" '
+                'returns to the automatic range.')
+        self.edZmin = NumEdit(0.0, width=78, tooltip=zTip)
+        self.edZmax = NumEdit(1.0, width=78, tooltip=zTip)
+        self.btnZAuto = button(
+            'Auto', width=54,
+            tooltip='Back to the automatic color range: up to the largest '
+                    'value of the two maps in the displayed ν range.')
+        bh.addWidget(label('Color range (both maps):'))
+        bh.addWidget(self.edZmin)
+        bh.addWidget(label('to'))
+        bh.addWidget(self.edZmax)
+        bh.addWidget(self.btnZAuto)
+        bh.addSpacing(12)
+        self.lblNote = ElideLabel(
+            'Follows the Coherence window. A click on a map moves the '
+            'cursor there.', color=(0.25, 0.25, 0.25))
+        bh.addWidget(self.lblNote, 1)
+        v.addLayout(bh)
+        self.cvMaps = PlotCanvas()
+        self.cvSpec = PlotCanvas()
+        self.cvMaps.setMinimumHeight(240)
+        self.cvSpec.setMinimumHeight(170)
+        v.addWidget(self.cvMaps, 13)
+        v.addWidget(self.cvSpec, 9)
+        fg = self.cvMaps.figure
+        self.axB = fg.add_subplot(121)
+        self.axA = fg.add_subplot(122)
+        self.cax = fg.add_axes([0.9, 0.1, 0.02, 0.8])
+        self.axS = self.cvSpec.figure.add_subplot(121)
+        self.axV = self.cvSpec.figure.add_subplot(122)
+        self.cvMaps.layoutFcn = self._layMaps
+        self.cvSpec.layoutFcn = self._laySpec
+        self.bl = BlitManager(self.cvMaps)
+        self.cvMaps.mpl_connect('button_press_event', self.onPress)
+        self.cvMaps.mpl_connect('motion_notify_event', self.onMotion)
+        self.cvMaps.mpl_connect('button_release_event',
+                                lambda ev: self.onUp())
+        self.edZmin.valueChanged.connect(
+            lambda *_: self.safe(self.onZRange, 'Color range'))
+        self.edZmax.valueChanged.connect(
+            lambda *_: self.safe(self.onZRange, 'Color range'))
+        self.btnZAuto.clicked.connect(
+            lambda *_: self.safe(self.onZAuto, 'Color range'))
+        self.refresh()
+
+    # One set of numbers (points) for the maps and for the spectra: the
+    # plot box of a spectrum has the left and the right edge of the map
+    # above it, so that a frequency is at the same place in both. LAY_L:
+    # tick labels and label of a y-axis; LAY_GAP: the same for the plots
+    # on the right (the spectrum there has a label, the map has none);
+    # LAY_R: the color bar of the maps, left free beside the spectra.
+    LAY_L, LAY_GAP, LAY_R, LAY_T, LAY_B = 58.0, 62.0, 74.0, 22.0, 34.0
+
+    def _columns(self, cv):
+        """Left edges of the two plot boxes of the canvas cv and their
+        width, in points (the two canvases are equally wide)."""
+        W, _ = cv.sizePt()
+        w = max((W - self.LAY_L - self.LAY_R - self.LAY_GAP) / 2.0, 4.0)
+        return self.LAY_L, self.LAY_L + w + self.LAY_GAP, w
+
+    def _layMaps(self):
+        W, H = self.cvMaps.sizePt()
+        T, B = self.LAY_T, self.LAY_B
+        x1, x2, w = self._columns(self.cvMaps)
+        self.cvMaps.place(self.axB, x1, B, w, H - T - B)
+        self.cvMaps.place(self.axA, x2, B, w, H - T - B)
+        self.cvMaps.place(self.cax, x2 + w + 8.0, B, 10.0, H - T - B)
+        setSpan(self.axB, 0.0, x2 - 0.5 * self.LAY_GAP)
+        setSpan(self.axA, x2 - 0.5 * self.LAY_GAP, x2 + w + 6.0)
+
+    def _laySpec(self):
+        W, H = self.cvSpec.sizePt()
+        T, B = self.LAY_T, self.LAY_B
+        x1, x2, w = self._columns(self.cvSpec)
+        self.cvSpec.place(self.axS, x1, B, w, H - T - B)
+        self.cvSpec.place(self.axV, x2, B, w, H - T - B)
+        setSpan(self.axS, 0.0, x2 - 0.5 * self.LAY_GAP)
+        setSpan(self.axV, x2 - 0.5 * self.LAY_GAP, W)
+
+    # ---- color range (of this window) --------------------------------
+    def onZRange(self):
+        lo, hi = self.edZmin.value(), self.edZmax.value()
+        logS = self.coh.ddYScale.currentData() == 'log'
+        if not zRangeOk(lo, hi, logS):
+            self.edZmin.setValue(self.zUsed[0])
+            self.edZmax.setValue(self.zUsed[1])
+            self.lblNote.setText(
+                'Color range: the maximum has to be larger than the '
+                'minimum%s.' % (' and positive' if logS else ''))
+            return
+        self.zManual = (float(lo), float(hi))
+        self.refresh()
+
+    def onZAuto(self):
+        self.zManual = None
+        self.refresh()
+
+    # ---- a click on a map moves the cursor of the Coherence window ---
+    def onPress(self, ev):
+        if ev.button != 1 or ev.inaxes not in (self.axB, self.axA):
+            return
+        self.dragging = True
+        self.dragAx = ev.inaxes
+        self.coh.applyPoint(ev.xdata, ev.ydata)
+
+    def onMotion(self, ev):
+        if not self.dragging or ev.x is None or ev.y is None:
+            return
+        try:
+            x, y = self.dragAx.transData.inverted().transform((ev.x, ev.y))
+        except Exception:
+            return
+        self.coh.applyPoint(x, y)
+
+    def onUp(self):
+        self.dragging = False
+
+    # ---- drawing -----------------------------------------------------
+    def refresh(self, cursorOnly=False):
+        c = self.coh
+        if not c.hasBefore():
+            self.close()
+            return
+        if cursorOnly and len(self.lines) == 4:
+            for k, ln in enumerate(self.lines):
+                if k % 2 == 0:
+                    ln.set_xdata([c.curFreq, c.curFreq])
+                else:
+                    ln.set_ydata([c.curLambda, c.curLambda])
+            self.bl.update()
+            self.plotSpectra()
+            return
+        self.plotMaps()
+        self.plotSpectra()
+
+    def plotMaps(self):
+        c, app = self.coh, self.app
+        r = c.res
+        wl = np.asarray(app.wavelength, float).ravel()
+        freq = r['freq']
+        Pa, Pb = r['Pmap'], r['before']['Pmap']
+        logS = c.ddYScale.currentData() == 'log'
+        zm = self.zManual
+        if zm is not None and not zRangeOk(zm[0], zm[1], logS):
+            zm = None
+        # one scale for both maps: neither is cut off
+        cLo, cHi, zLo, zHi = colorLims(np.maximum(Pa, Pb), c.getDispLims(),
+                                       freq, logS, zm)
+        self.zUsed = (zLo, zHi)
+        self.edZmin.setValue(zLo)
+        self.edZmax.setValue(zHi)
+        self.btnZAuto.setEnabled(self.zManual is not None)
+        xl = c.getXlimForFreq(freq)
+        self.cax.clear()
+        self.lines = []
+        h = None
+        kw = dict(color='k', linewidth=1.0, alpha=0.7)
+        for ax, P, ttl, sh in (
+                (self.axB, Pb, 'Before the solvent subtraction', 'Before'),
+                (self.axA, Pa, 'After the solvent subtraction', 'After')):
+            ax.clear()
+            styleAxes(ax)
+            ax.set_facecolor(AX_BG)
+            Cdat = np.log10(np.maximum(P, zLo)) if logS else P
+            if wl.size > 1 and freq.size > 1:
+                h = ax.pcolormesh(freq, wl,
+                                  np.ma.masked_invalid(Cdat[:-1, :-1]),
+                                  shading='flat', cmap='turbo', vmin=cLo,
+                                  vmax=cHi, rasterized=True)
+            ax.set_xlim(xl[0], xl[1])
+            ax.set_ylim(float(np.min(wl)), float(np.max(wl)))
+            ax.set_xlabel(freqAxLabel(r['info']['freqUnit']))
+            setTitle(ax, ttl, sh)
+            self.lines.append(ax.axvline(c.curFreq, **kw))
+            self.lines.append(ax.axhline(c.curLambda, **kw))
+        self.axB.set_ylabel(app.xAxLabel())
+        self.cax.set_visible(h is not None)
+        if h is not None:
+            cb = self.cvMaps.figure.colorbar(h, cax=self.cax)
+            cb.set_label('log$_{10}$|FFT|$^2$' if logS else P_LABEL,
+                         fontsize=FONT_PT)
+            cb.ax.tick_params(labelsize=FONT_PT, length=3)
+            if not logS:
+                sciTicks(cb.ax, 'y')
+        self.bl.setArtists(self.lines)
+        self._layMaps()
+        self.cvMaps.draw_idle()
+
+    def plotSpectra(self):
+        c, app = self.coh, self.app
+        r = c.res
+        wl = np.asarray(app.wavelength, float).ravel()
+        freq = r['freq']
+        Pa, Pb = r['Pmap'], r['before']['Pmap']
+        iw = int(np.argmin(np.abs(wl - c.curLambda)))
+        fqAct = freq[int(np.argmin(np.abs(freq - c.curFreq)))]
+        ysc = c.ddYScale.currentData()
+        xl = c.getXlimForFreq(freq)
+        dash = dict(color='k', linestyle='--', linewidth=0.8, alpha=0.6)
+        kg = dict(color=GRAY, linewidth=1.3, zorder=1.5,
+                  label='before subtraction')
+        Pavg, lo, hi, inR = c.avgSpectrum()
+        n = int(np.count_nonzero(inR))
+        for ax, yb, ya, col, ttl in (
+                (self.axS, Pb[iw, :], Pa[iw, :], BLUE,
+                 ('Power spectrum at %s = %.2f %s' % (
+                     app.xSym(), wl[iw], app.xUnitAx()),)),
+                (self.axV, c.avgSpectrum(Pb)[0], Pavg, GREEN,
+                 ('Average over %s = %.0f .. %.0f %s (N=%d)' % (
+                     app.xSym(), lo, hi, app.xUnitAx(), n),
+                  'Average, %.0f .. %.0f %s (N=%d)' % (
+                      lo, hi, app.xUnitAx(), n)))):
+            ax.clear()
+            styleAxes(ax, grid=True)
+            hB, = ax.plot(freq, yb, '-', **kg)
+            hA, = ax.plot(freq, ya, '-', color=col, linewidth=1.4,
+                          label='after subtraction')
+            legend(ax, handles=[hB, hA], shorter=['before', 'after'],
+                   fontsize=FONT_PT)
+            ax.axvline(fqAct, **dash)
+            ax.set_xlim(xl[0], xl[1])
+            ax.set_xlabel(freqAxLabel(r['info']['freqUnit']))
+            ax.set_ylabel(P_LABEL)
+            setTitle(ax, *ttl)
+            ax.set_yscale(ysc)
+            if ysc != 'log':
+                sciTicks(ax, 'y')
+        self._laySpec()
+        self.cvSpec.draw_idle()
+
+
 def emptyTf():
     return {'Ptf': None, 'freq': None, 'tc': None, 'info': {},
             'trace': None, 'srcLabel': '', 'srcTxt': ''}
@@ -1158,7 +1903,9 @@ class TimeFrequencyWindow(ChildWindow):
         self.axTrace = self.cvTrace.figure.add_subplot(111)
         self.cvMap.layoutFcn = self._layMap
         self.cvDecay.layoutFcn = lambda: lay1(self.cvDecay, self.axDecay)
-        self.cvSpecT.layoutFcn = lambda: lay1(self.cvSpecT, self.axSpecT)
+        # (under the map: the room of its color bar stays free)
+        self.cvSpecT.layoutFcn = lambda: lay1(self.cvSpecT, self.axSpecT,
+                                              R=74.0)
         self.cvTrace.layoutFcn = lambda: lay1(self.cvTrace, self.axTrace)
         self.blMap = BlitManager(self.cvMap)
         self.cvMap.mpl_connect('button_press_event', self.onMapPress)

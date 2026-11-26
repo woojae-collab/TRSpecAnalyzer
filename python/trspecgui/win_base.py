@@ -6,14 +6,13 @@ from .textfit import setSpan, setTitle
 from .widgets import (AX_BG, FONT_PT, BlitManager, FewTicks, PlotCanvas,
                       sciTicks, styleAxes)
 
-Z_LABEL = 'ΔA or Intensity'
 GREEN = (0.30, 0.65, 0.35)
 BLUE = (0.30, 0.55, 0.80)
 PURPLE = (0.55, 0.30, 0.70)
 
 # windows that rest on the working data: closed when the data change
-ANALYSIS_KEYS = ('tf', 'coherence', 'ga', 'kinfit', 'svd', 'lda', 'mcr',
-                 'target', 'auto')
+ANALYSIS_KEYS = ('tf', 'cohcmp', 'coherence', 'ga', 'kinfit', 'svd', 'lda', 'mcr',
+                 'target', 'auto', 'bandpos')
 
 
 def fitSize(w, h):
@@ -112,7 +111,7 @@ def mapOn(app, ax, cax, wl, t, data, cl=None, alpha=None):
             h.set_alpha(np.asarray(alpha, float))
         if cax is not None:
             cb = ax.figure.colorbar(h, cax=cax)
-            cb.set_label(Z_LABEL, fontsize=FONT_PT)
+            cb.set_label(app.sigName(), fontsize=FONT_PT)
             cb.ax.tick_params(labelsize=FONT_PT, length=3)
             cb.solids.set_alpha(1.0)
             sciTicks(cb.ax, 'y')
@@ -181,7 +180,10 @@ class MapTriple:
             return
         cv = self.cv
         W, H = cv.sizePt()
-        L, R, T, B, gapV, gapH = 44.0, 46.0, 20.0, 34.0, 6.0, 4.0
+        # (R: the color bar, its numbers and its label)
+        # (L as the plots below the maps in the Global Analysis
+        # window, whose rows end where the last map ends)
+        L, R, T, B, gapV, gapH = 54.0, 60.0, 20.0, 34.0, 6.0, 4.0
         wG = (W - 2 * gapH) / 3.0
         for i, g in enumerate(self.groups):
             x0 = i * (wG + gapH)
@@ -280,6 +282,8 @@ class MapTriple:
             if cbOn and mesh is not None:
                 cax.set_visible(True)
                 cb = self.cv.figure.colorbar(mesh, cax=cax)
+                cb.set_label(app.sigName(), fontsize=FONT_PT - 1,
+                             labelpad=2.0)
                 cb.ax.tick_params(labelsize=FONT_PT - 1, length=2)
                 sciTicks(cb.ax, 'y')
             else:

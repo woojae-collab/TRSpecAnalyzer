@@ -7,7 +7,7 @@ TRSpecAnalyzer.m.
 """
 import numpy as np
 from ._util import interp1_nan
-from .chirp import chirp_model, fit_chirp_params
+from .chirp import chirp_model, fit_chirp_params, chirp_shift
 
 
 def read_data_file(path):
@@ -267,10 +267,7 @@ class Dataset:
         if self.chirp_applied and self.chirp_params is not None:
             t = self.delay
             t0 = chirp_model(self.chirp_params, self.wavelength)
-            new = np.full(data.shape, np.nan)
-            for i in range(self.wavelength.size):
-                new[i, :] = interp1_nan(t, data[i, :], t + t0[i])
-            data = new
+            data = chirp_shift(t, data, t0)
         for lo, hi, mode in self.masked_regions:
             rows = (self.wavelength >= lo) & (self.wavelength <= hi)
             if not rows.any():

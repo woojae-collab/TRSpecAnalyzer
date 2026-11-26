@@ -37,6 +37,36 @@ classdef TRSpecAnalyzer < handle
     %     - Spectral-axis unit switching: wavelength (nm, default) or
     %       wavenumber (cm-1) for TR-Raman / TR-IR; relabels every axis,
     %       title, control and export header (values are not converted)
+    %     - Signal conversion for transient absorption: dA <-> dT/T by
+    %       the exact relation dT/T = 10^(-dA) - 1 (dA in OD or mOD).
+    %       Like a crop, the conversion takes the data with all
+    %       corrections made so far as the new starting point
+    %     - Subtract data: a reference data set measured on the same
+    %       axes (solvent, substrate) is subtracted from the data as
+    %       loaded, data - scale * reference(t - shift), before every
+    %       other correction; scale and shift typed or least-squares
+    %       estimates in a chosen range
+    %     - Anisotropy: perpendicular data loaded beside the (parallel)
+    %       data get every correction alike; the main window shows and
+    %       analyzes one of four views: parallel, perpendicular, magic
+    %       angle (par + 2 G perp)/3, anisotropy r = (par - G perp) /
+    %       (par + 2 G perp); G typed or from tail matching (one G for
+    %       all wavelengths; the Anisotropy window shows the G of every
+    %       single wavelength as a check). The setup and the results of
+    %       the analysis windows are kept for each view
+    %     - Solvent coherence (Coherence window): the vibrational
+    %       coherence of the solvent, measured alone, is taken out of the
+    %       residual before the FFT; its factor and time shift are fitted
+    %       on the real and imaginary parts of the Fourier transforms in
+    %       the band of a solvent mode (M. Liebel, thesis, Oxford 2014,
+    %       Fig. 4.6). While it is subtracted there, "View" of the main
+    %       window shows and analyzes the data without the solvent: its
+    %       oscillating part in the time window of the analysis, or the
+    %       whole solvent signal at all delays (setSolvView); setup and
+    %       results are kept for each view
+    %     - Fit trace on a band of wavelengths: the integral over the
+    %       spectral axis or the mean of the band is fitted instead of
+    %       the trace at one wavelength
     %     - Session save / load: the full working state (data, all
     %       corrections, fit settings, every analysis result and its
     %       settings, view options) round-trips through a .mat file so an
@@ -50,11 +80,19 @@ classdef TRSpecAnalyzer < handle
     %     - 2D map with drag-based crosshair: click and drag to smoothly
     %       move the monitored (lambda, t), with synchronized vertical
     %       lines on the spectrum and kinetics side panels
-    %     - Linear / Log / Split scale on the delay axis; split-view
-    %       kinetics with synchronized y-range and decade ticks
+    %     - Linear / Log / Split scale on the delay axis (the two panels
+    %       of the split map exactly equally wide); split-view kinetics
+    %       with synchronized y-range and decade ticks
     %     - Spectrum & kinetics side panels with pin overlay
     %     - Multiple colormaps with consistent crosshair styling across
     %       all child windows
+    %     - In every window the plots stand in rows and columns: the
+    %       plot boxes of a row have the same upper and lower edge,
+    %       those of a column the same left edge. Most plots without
+    %       a color bar use the room that the bar of a map takes; some
+    %       stay as wide as the map above or below them (the spectrum
+    %       under the map of the LDA window, the SVD window, the
+    %       Corrections tab of the Auto window)
     %
     %     Kinetic / spectral analysis
     %       (every analysis window supports the same click+drag
@@ -149,6 +187,19 @@ classdef TRSpecAnalyzer < handle
     %     - CSV exports: the full map (frequency on rows, wavelength on
     %       columns), P(nu) at lambda, the lambda-averaged P(nu), and the
     %       profile at nu including a phase column
+    %     - Color range of the map: automatic, or typed ("Color range",
+    %       "Auto")
+    %     - Before / after a solvent subtraction: the result from before
+    %       is kept beside the result; the map shows either, the curve
+    %       plots carry the curve from before in gray, and a second
+    %       window puts the two maps side by side on one color scale,
+    %       each power spectrum exactly under its map
+    %     - Interpolation along the delays (chirp correction, time shift
+    %       of "Subtract data" and of the perpendicular data): a cubic
+    %       spline inside every stretch of equally spaced delays, so that
+    %       oscillations and sharp features keep their height; linear
+    %       elsewhere, because a spline overshoots where the delay step
+    %       jumps (interpRuns)
     %     - Time-frequency analysis window (opened from Coherence): nu-t
     %       map of the coherence residual at one lambda or a lambda-range
     %       average by STFT (sliding-window FFT) or Morlet CWT (FFT-based,
@@ -186,7 +237,7 @@ classdef TRSpecAnalyzer < handle
     %   Author: Woojae Kim (written with Claude Code)
     %           ULS Lab, Department of Chemistry, Yonsei University
     %
-    %   Version 1.0.2 (2026-11-22). The number is the constant
+    %   Version 1.1.0 (2026-11-26). The number is the constant
     %   TRSpecAnalyzer.Version (major.minor.patch): it is shown in the
     %   title of the main window and written into saved sessions and
     %   Auto Analysis reports. Changes are listed in CHANGELOG.md.
@@ -200,8 +251,8 @@ classdef TRSpecAnalyzer < handle
         % files or the way the program is used), and its date. Shown in
         % the title of the main window; written into saved sessions
         % (meta.appVersion) and Auto Analysis reports.
-        Version     = '1.0.2';
-        VersionDate = '2026-11-22';
+        Version     = '1.1.0';
+        VersionDate = '2026-11-26';
     end
     
     properties (Access = public)
@@ -216,6 +267,71 @@ classdef TRSpecAnalyzer < handle
         originalDelay      = []
         originalDeltaA     = []
         dataSourceDesc     = ''
+        
+        % ---- Signal kind (transient absorption) ----
+        sigKind     = 'dA'     % what the working data are: 'dA' | 'dTT' | 'int'
+        sigOrigKind = 'dA'     % what the data were when they were loaded
+        sigLoadKind = 'dA'     % what loaded files contain (chosen at loading)
+        sigAUnit    = 'OD'     % unit of dA in the conversion: 'OD' | 'mOD'
+        
+        % ---- Reference data set (solvent / substrate) ----
+        refOrig     = []       % as loaded, on the axes of the loaded data
+        refDesc     = ''       % its file name
+        subApplied  = false    % subtracted from the data as loaded
+        subScale    = 1        % factor of the reference
+        subShift    = 0        % its shift in time (time unit of the data)
+        subBaked    = false    % a subtraction has become part of deltaA_raw
+        baseRebased = false    % deltaA_raw is no longer the loaded data
+        refStage    = []       % the reference at the stage of deltaA_raw
+        
+        % ---- Anisotropy (two polarizations) ----
+        aniOn     = false      % perpendicular data are loaded
+        perpOrig  = []         % as loaded, on the axes of the loaded data
+        perpDesc  = ''         % their file name
+        perpStage = []         % at the stage of deltaA_raw
+        aniView   = 'r'        % what deltaA is: 'par' | 'perp' | 'magic' | 'r'
+        aniG      = 1          % factor of the perpendicular data (typed)
+        aniTail   = false      % take G from tail matching instead
+        aniTailT  = [NaN NaN]  % delay range of the tail matching
+        aniThr    = 3          % r left empty where |par + 2 G perp| < aniThr x noise
+        aniShift  = 0          % time shift of the perpendicular data: perp(t - aniShift)
+        aniPar    = []         % corrected parallel data (set by recompute)
+        aniPerp   = []         % corrected perpendicular data (shifted by aniShift)
+        aniPerp0  = []         % the same before the time shift
+        aniGUsed  = 1          % G in force
+        aniStore  = struct()   % setup and results of the analysis windows
+                               % for the views that are not shown (one
+                               % field per view, see setAniView)
+        aniKeepStore = false   % a change that leaves the data of other
+                               % views alone is under way (applyAnisotropy)
+        ddAniView = []         % main window: the view selector
+        
+        % ---- Solvent coherence (Coherence window) ----
+        solvOn       = false       % take the solvent coherence out of the residual
+        solvA        = 1           % factor of the solvent coherence
+        solvShift    = 0           % its shift in time (time unit of the data)
+        solvBand     = [NaN NaN]   % frequency band of the fit (unit: solvBandUnit)
+        solvBandUnit = 'cm-1'      % 'cm-1' | 'thz'
+        solvWL       = [NaN NaN]   % spectral range of the fit (NaN: all)
+        solvMaxShift = NaN         % largest shift the fit tries (NaN: 2 delay steps)
+        % (the solvent views of the main window: the data without the
+        %  solvent. They exist while the subtraction is in force in the
+        %  Coherence window, and take out what that analysis subtracts.)
+        solvView      = 'data'     % 'data' | 'osc' (oscillating part, in the
+                                   % time window) | 'all' (whole solvent
+                                   % signal, all delays)
+        solvData      = false      % a solvent view is shown (solvView is not 'data')
+        solvDataA     = 1          % factor of the views
+        solvDataShift = 0          % their shift in time (time unit of the data)
+        solvDataWin   = [NaN NaN]  % time window of 'osc' (as the Coherence window)
+        solvDataPad   = 0          % largest shift the coherence is continued for
+        solvStore     = struct()   % setup and results of the analysis windows
+                                   % kept for the solvent views not shown
+        
+        % ---- Steps that made corrected data the starting point ----
+        corrLog     = {}       % one struct per step, in order
+        corrLogOK   = true     % false: steps not known (older session)
+        pendingAuto = []       % corrections of Auto Analysis being applied
         
         % ---- Correction state ----
         bgApplied    = false
@@ -268,12 +384,17 @@ classdef TRSpecAnalyzer < handle
         hVLine     = gobjects(0)
         hHLine     = gobjects(0)
         cbarAx     = []   % dedicated axes to host colorbar in split mode
+        pnlMap2D   = []   % panel of the two axes of the split map
+        mapPanelSize = [760 620]    % its size at the last layout (pixels)
+        mapBarYH   = [0.04 0.935]   % colorbar of the split map in its cell:
+                                    % [bottom height], normalized
         
         edSelWL; edSelT
         ddScale; edThreshold
         edViewTMin; edViewTMax
         ddColormap; edZMin; edZMax
         lblStatus
+        lblSignal = []         % data-tools row: kind of the signal shown
         
         % ---- Child windows ----
         bgFig    = []
@@ -290,6 +411,7 @@ classdef TRSpecAnalyzer < handle
         coherenceFig = []
         tfFig        = []      % time-frequency (STFT / CWT) window
         autoFig      = []      % automatic analysis window
+        bandFig      = []      % band position window
         
         % ---- Main 2D map drag state ----
         dragging2D = false
@@ -357,6 +479,9 @@ classdef TRSpecAnalyzer < handle
         gaFitTMax = []
         kfFitTMin = []             % single-wl fit time range
         kfFitTMax = []
+        kfBandOn  = false          % Fit trace on a band of wavelengths
+        kfBandTo  = NaN            % its other end (NaN: proposed)
+        kfBandMode = 'integral'    % 'integral' | 'mean'
         
         % Persistent stores for child analysis windows, so results
         % survive the window being closed and reopened. Each holds a
@@ -371,6 +496,7 @@ classdef TRSpecAnalyzer < handle
         tgSaved  = []      % target analysis: last result
         tgSet    = []      % target analysis: scheme and fit settings
         autoSaved = []     % automatic analysis: last run and its options
+        bpSaved   = []     % band position: setup and last result
         
         % Persistent app preferences (stored in prefdir, survive restarts)
         prefLastDir = ''   % last folder used in a file dialog
@@ -380,6 +506,7 @@ classdef TRSpecAnalyzer < handle
         % analysis results that were just loaded with it.
         holdDataChange = false
         quadGL = []                % cached Gauss-Legendre nodes / weights
+        calcCache = []             % last results of cachedCalc (not saved)
         
         % Spectral-axis unit: 'nm' (wavelength) or 'cm-1' (wavenumber,
         % for TR-Raman / TR-IR). Display + export labels only; the
@@ -422,8 +549,8 @@ classdef TRSpecAnalyzer < handle
             app.fig.WindowButtonMotionFcn = @(~,~) app.on2DMotion();
             app.fig.WindowButtonUpFcn     = @(~,~) app.on2DUp();
             
-            gl = uigridlayout(app.fig, [5, 2]);
-            gl.RowHeight     = {38, 38, 38, '1x', '1x'};
+            gl = uigridlayout(app.fig, [6, 2]);
+            gl.RowHeight     = {38, 38, 38, 38, '1x', '1x'};
             gl.ColumnWidth   = {'2x', '1x'};
             gl.RowSpacing    = 6;
             gl.ColumnSpacing = 8;
@@ -481,11 +608,58 @@ classdef TRSpecAnalyzer < handle
                 'HorizontalAlignment', 'right', ...
                 'FontColor', [0.3 0.3 0.3]);
             
-            % ---- Toolbar row 2: analyses (SVD, GA, Target, LDA, MCR-ALS,
-            %      Coherence, Auto Analysis) ----
-            tbA = uigridlayout(gl, [1, 8]);
-            tbA.Layout.Row = 2;  tbA.Layout.Column = [1 2];
-            tbA.ColumnWidth   = {110, 160, 150, 110, 110, 130, 140, '1x'};
+            % ---- Toolbar row 2: data tools ----
+            tbD = uigridlayout(gl, [1, 7]);
+            tbD.Layout.Row = 2;  tbD.Layout.Column = [1 2];
+            tbD.ColumnWidth   = {130, 120, 'fit', 215, 150, 'fit', '1x'};
+            tbD.ColumnSpacing = 6;  tbD.Padding = [0 0 0 0];
+            uibutton(tbD, 'Text', 'Subtract data...', ...
+                'Tooltip', ['Subtract a reference data set measured on ' ...
+                    'the same axes (solvent, substrate) from the data ' ...
+                    'as loaded: data - scale x reference, with an ' ...
+                    'optional shift in time. Done before every other ' ...
+                    'correction.'], ...
+                'ButtonPushedFcn', @(~,~) app.openSubtractWindow());
+            uibutton(tbD, 'Text', 'Anisotropy...', ...
+                'Tooltip', ['Load the data measured with perpendicular ' ...
+                    'polarization (the data in this window are the ' ...
+                    'parallel ones) and look at the anisotropy r, the ' ...
+                    'magic-angle signal or either polarization.'], ...
+                'ButtonPushedFcn', @(~,~) app.openAnisotropyWindow());
+            uilabel(tbD, 'Text', 'View:', 'HorizontalAlignment', 'right');
+            app.ddAniView = uidropdown(tbD, ...
+                'Items', {'Parallel', 'Perpendicular', 'Magic angle', ...
+                          'Anisotropy r'}, ...
+                'ItemsData', {'par', 'perp', 'magic', 'r'}, ...
+                'Value', 'r', 'Enable', 'off', ...
+                'Tooltip', ['What is shown and analyzed. With ' ...
+                    'perpendicular data ("Anisotropy..."): one of the two ' ...
+                    'polarizations or a combination of them. While the ' ...
+                    'solvent coherence is subtracted in the Coherence ' ...
+                    'window ("Solvent coherence...", Apply): the data, ' ...
+                    'the data without the oscillating part of the ' ...
+                    'solvent in the time window of that analysis, or the ' ...
+                    'data without the whole solvent signal at all ' ...
+                    'delays. The analysis windows close when the view ' ...
+                    'changes; their setup and results are kept for every ' ...
+                    'view and come back with it.'], ...
+                'ValueChangedFcn', @(src,~) app.onViewChoice(src.Value));
+            uibutton(tbD, 'Text', app.uiStr('\DeltaA <-> \DeltaT/T...'), ...
+                'Tooltip', app.uiStr(['Convert transient-absorption data ' ...
+                    'between \DeltaA and \DeltaT/T ' ...
+                    '(\DeltaT/T = 10^(-\DeltaA) - 1). The converted ' ...
+                    'data become the new starting point, as after a ' ...
+                    'crop; "Reset all" returns to the data as loaded.']), ...
+                'ButtonPushedFcn', @(~,~) app.openSignalWindow());
+            app.lblSignal = uilabel(tbD, 'Text', '', ...
+                'FontColor', [0.3 0.3 0.3]);
+            uilabel(tbD, 'Text', '');   % spacer
+            
+            % ---- Toolbar row 3: analyses (SVD, GA, Target, LDA, MCR-ALS,
+            %      Coherence, Band position, Auto Analysis) ----
+            tbA = uigridlayout(gl, [1, 9]);
+            tbA.Layout.Row = 3;  tbA.Layout.Column = [1 2];
+            tbA.ColumnWidth   = {110, 160, 150, 110, 110, 130, 140, 140, '1x'};
             tbA.ColumnSpacing = 6;  tbA.Padding = [0 0 0 0];
             
             uibutton(tbA, 'Text', 'SVD...', ...
@@ -533,6 +707,14 @@ classdef TRSpecAnalyzer < handle
                     'Reveals coherent vibrational modes of excited ' ...
                     'or ground state.'], ...
                 'ButtonPushedFcn', @(~,~) app.openCoherenceWindow());
+            uibutton(tbA, 'Text', 'Band position...', ...
+                'BackgroundColor', [0.45 0.40 0.70], 'FontColor', 'w', ...
+                'Tooltip', ['Where a band lies at every delay (spectral ' ...
+                    'shift, dynamic Stokes shift): its position by the ' ...
+                    'first moment, by the maximum or by a log-normal ' ...
+                    'fit, and a fit of that position along the delays ' ...
+                    'with a sum of exponentials.'], ...
+                'ButtonPushedFcn', @(~,~) app.openBandPositionWindow());
             uibutton(tbA, 'Text', 'Auto Analysis...', ...
                 'BackgroundColor', [0.20 0.50 0.45], 'FontColor', 'w', ...
                 'Tooltip', ['Automatic analysis: proposes the corrections ' ...
@@ -545,9 +727,9 @@ classdef TRSpecAnalyzer < handle
                 'ButtonPushedFcn', @(~,~) app.openAutoWindow());
             uilabel(tbA, 'Text', '');   % spacer (right edge)
             
-            % ---- Toolbar row 3: display t range + time unit ----
+            % ---- Toolbar row 4: display t range + time unit ----
             tb2 = uigridlayout(gl, [1, 13]);
-            tb2.Layout.Row = 3;  tb2.Layout.Column = [1 2];
+            tb2.Layout.Row = 4;  tb2.Layout.Column = [1 2];
             tb2.ColumnWidth = {'fit', 80, 'fit', 80, 100, 160, ...
                                105, 105, ...
                                'fit', 70, 'fit', 165, '1x'};
@@ -610,7 +792,7 @@ classdef TRSpecAnalyzer < handle
             % ---- 2D map panel ----
             app.pnl2D = uipanel(gl, ...
                 'Title', app.uiStr('2D Map  -  click to select (\lambda, t)'));
-            app.pnl2D.Layout.Row = [4 5];
+            app.pnl2D.Layout.Row = [5 6];
             app.pnl2D.Layout.Column = 1;
             pnl2DGrid = uigridlayout(app.pnl2D, [2, 1]);
             pnl2DGrid.RowHeight = {32, '1x'};
@@ -652,7 +834,7 @@ classdef TRSpecAnalyzer < handle
             
             % ---- Spectrum panel ----
             app.pnlSpec = uipanel(gl, 'Title', 'Spectrum  (at selected delay)');
-            app.pnlSpec.Layout.Row = 4;  app.pnlSpec.Layout.Column = 2;
+            app.pnlSpec.Layout.Row = 5;  app.pnlSpec.Layout.Column = 2;
             glS = uigridlayout(app.pnlSpec, [2, 1]);
             glS.RowHeight = {'1x', 38};  glS.Padding = [5 5 5 5];
             app.axContSpec = uigridlayout(glS, [1 1]);
@@ -672,7 +854,7 @@ classdef TRSpecAnalyzer < handle
             
             % ---- Kinetics panel ----
             app.pnlKin = uipanel(gl, 'Title', 'Kinetics  (at selected wavelength)');
-            app.pnlKin.Layout.Row = 5;  app.pnlKin.Layout.Column = 2;
+            app.pnlKin.Layout.Row = 6;  app.pnlKin.Layout.Column = 2;
             glK = uigridlayout(app.pnlKin, [2, 1]);
             glK.RowHeight = {'1x', 38};  glK.Padding = [5 5 5 5];
             app.axContKin = uigridlayout(glK, [1 1]);
@@ -708,20 +890,29 @@ classdef TRSpecAnalyzer < handle
             app.hVLine = gobjects(0);
             app.hHLine = gobjects(0);
             app.cbarAx = [];
+            app.pnlMap2D = [];
             
             if strcmp(app.delayScaleMode, 'split')
-                app.axCont2D.RowHeight   = {'2x', '1x'};
+                app.axCont2D.RowHeight   = {'1x'};
                 app.axCont2D.ColumnWidth = {'1x', 85};
-                axTop = uiaxes(app.axCont2D);
-                axTop.Layout.Row = 1;  axTop.Layout.Column = 1;
-                axBot = uiaxes(app.axCont2D);
-                axBot.Layout.Row = 2;  axBot.Layout.Column = 1;
-                % Dedicated hidden axes for colorbar, spanning both rows
-                cbAx = uiaxes(app.axCont2D);
-                cbAx.Layout.Row = [1 2];  cbAx.Layout.Column = 2;
-                cbAx.Visible = 'off';
-                app.cbarAx = cbAx;
+                % The two axes are in one panel and their plot boxes are
+                % placed by hand (layoutMap2D): the upper and the lower
+                % panel of the map have the same left and right edge. As
+                % cells of the grid, each axes gave its box the room its
+                % own labels leave, and the lower one, with the tick
+                % labels of the spectral axis, came out narrower.
+                app.pnlMap2D = uipanel(app.axCont2D, 'BorderType', 'none');
+                app.pnlMap2D.Layout.Row = 1;
+                app.pnlMap2D.Layout.Column = 1;
+                try, app.pnlMap2D.AutoResizeChildren = 'off'; catch, end
+                axTop = uiaxes(app.pnlMap2D);
+                axBot = uiaxes(app.pnlMap2D);
+                % The colorbar has a cell of its own beside the panel;
+                % the bar is placed in it by hand (placeCbar)
+                app.cbarAx = app.newCbarHost(app.axCont2D, 1, 2);
                 app.ax2D = [axTop, axBot];
+                app.layoutMap2D();
+                app.pnlMap2D.SizeChangedFcn = @(~,~) app.layoutMap2D();
             else
                 app.axCont2D.RowHeight   = {'1x'};
                 app.axCont2D.ColumnWidth = {'1x'};
@@ -744,9 +935,9 @@ classdef TRSpecAnalyzer < handle
         
         function buildSpecAxes(app)
             delete(app.axContSpec.Children);
-            app.axSpec = uiaxes(app.axContSpec);
+            app.axSpec = app.boxAxes(app.axContSpec, [56 14 24 40]);
             xlabel(app.axSpec, app.xAxLabel());
-            ylabel(app.axSpec, '\DeltaA or Intensity');
+            ylabel(app.axSpec, app.sigName());
         end
         
         function buildKinAxes(app)
@@ -755,17 +946,17 @@ classdef TRSpecAnalyzer < handle
             if strcmp(app.delayScaleMode, 'split')
                 app.axContKin.RowHeight   = {'1x'};
                 app.axContKin.ColumnWidth = {'1x', '2x'};
-                axL = uiaxes(app.axContKin);  axL.Layout.Column = 1;
-                axR = uiaxes(app.axContKin);  axR.Layout.Column = 2;
+                axL = app.boxAxes(app.axContKin, [56 8 24 40], [], 1);
+                axR = app.boxAxes(app.axContKin, [56 14 24 40], [], 2);
                 app.axKin = [axL, axR];
             else
                 app.axContKin.RowHeight   = {'1x'};
                 app.axContKin.ColumnWidth = {'1x'};
-                app.axKin = uiaxes(app.axContKin);
+                app.axKin = app.boxAxes(app.axContKin, [56 14 24 40]);
             end
             for k = 1:numel(app.axKin)
                 xlabel(app.axKin(k), sprintf('Delay time (%s)', app.tUnitAx()));
-                ylabel(app.axKin(k), '\DeltaA or Intensity');
+                ylabel(app.axKin(k), app.sigName());
             end
             
             % --- Pre-warm the uifigure web renderer (CEF) ---
@@ -858,8 +1049,8 @@ classdef TRSpecAnalyzer < handle
             mgl = uigridlayout(mp, [1, 1]);  mgl.Padding = [0 0 0 0];
             ax = uiaxes(mgl);
             
-            tog = uigridlayout(gl, [1, 3]);
-            tog.ColumnWidth = {'fit', 180, '1x'};
+            tog = uigridlayout(gl, [1, 5]);
+            tog.ColumnWidth = {'fit', 180, '1x', 'fit', 120};
             tog.Padding = [0 0 0 0];  tog.ColumnSpacing = 10;
             uilabel(tog, 'Text', ['If wavelength ends up on the y-axis ' ...
                 'or delay on the x-axis, use:'], ...
@@ -872,6 +1063,17 @@ classdef TRSpecAnalyzer < handle
                     'wavelength instead of the expected layout.']);
             uilabel(tog, 'Text', fname, ...
                 'FontAngle', 'italic', 'FontColor', [0.4 0.4 0.4]);
+            uilabel(tog, 'Text', 'Signal:', 'HorizontalAlignment', 'right');
+            ddSig = uidropdown(tog, ...
+                'Items', {app.sigShort('dA'), app.sigShort('dTT'), ...
+                          app.sigShort('int')}, ...
+                'ItemsData', {'dA', 'dTT', 'int'}, ...
+                'Value', app.sigLoadKind, ...
+                'Tooltip', app.uiStr(['What the numbers in the file are: ' ...
+                    '\DeltaA or \DeltaT/T (transient absorption, TR-IR) ' ...
+                    'or an intensity (TR-PL, Raman). Decides the name ' ...
+                    'on the axes and whether the \DeltaA <-> \DeltaT/T ' ...
+                    'conversion is offered. Remembered for the next file.']));
             
             btnRow = uigridlayout(gl, [1, 3]);
             btnRow.ColumnWidth = {'1x', 140, 140};
@@ -883,12 +1085,19 @@ classdef TRSpecAnalyzer < handle
             
             drawPreview();
             cbT.ValueChangedFcn = @(~,~) drawPreview();
+            ddSig.ValueChangedFcn = @(~,~) onSigKind();
             btnLoad.ButtonPushedFcn = @(~,~) doLoad();
             btnCancel.ButtonPushedFcn = @(~,~) doCancel();
             f.CloseRequestFcn = @(~,~) doCancel();
             uiwait(f);
             
             % --- nested ---
+            function onSigKind()
+                app.sigLoadKind = ddSig.Value;
+                app.savePrefs();
+                drawPreview();
+            end
+            
             function [wlCur, tCur, Acur] = currentOrientation()
                 if cbT.Value
                     wlCur = t(:);  tCur = wl(:).';  Acur = A.';
@@ -933,7 +1142,7 @@ classdef TRSpecAnalyzer < handle
                 ax.YDir = 'normal';
                 ax.CLim = [-cl cl];
                 colormap(ax, app.getColormap());
-                cb = colorbar(ax);  cb.Label.String = '\DeltaA or Intensity';
+                cb = colorbar(ax);  cb.Label.String = app.sigNameOf(app.sigLoadKind);
                 xlabel(ax, app.xAxLabel());
                 ylabel(ax, sprintf('Delay time (%s)', app.tUnitAx()));
                 xlim(ax, [min(wlCur), max(wlCur)]);
@@ -990,6 +1199,11 @@ classdef TRSpecAnalyzer < handle
             app.delay       = t;
             app.deltaA_raw  = A;
             app.deltaA      = A;
+            app.sigOrigKind = app.sigLoadKind;
+            app.sigKind     = app.sigLoadKind;
+            app.clearReference();
+            app.clearAnisotropy();
+            app.corrLog = {};  app.corrLogOK = true;  app.pendingAuto = [];
             
             % Reset all state
             app.bgApplied = false;  app.bgSpectrum = [];  app.bgN = 0;
@@ -1043,6 +1257,7 @@ classdef TRSpecAnalyzer < handle
         end
         
         function updateStatusLabel(app)
+            app.updateSignalLabel();
             if isempty(app.wavelength)
                 app.lblStatus.Text = 'No data loaded';
                 return;
@@ -1066,7 +1281,7 @@ classdef TRSpecAnalyzer < handle
         % =================================================================
         function recompute(app)
             if isempty(app.deltaA_raw), return; end
-            data = app.deltaA_raw;
+            data = app.pipelineBase();
             if app.bgApplied && ~isempty(app.bgSpectrum)
                 data = data - app.bgSpectrum;
             end
@@ -1074,12 +1289,7 @@ classdef TRSpecAnalyzer < handle
                 t  = app.delay(:).';
                 wl = app.wavelength(:);
                 t0 = app.chirpModel(app.chirpParams, wl);
-                newData = NaN(size(data));
-                for i = 1:numel(wl)
-                    newData(i,:) = interp1(t, data(i,:), t + t0(i), ...
-                        'linear', NaN);
-                end
-                data = newData;
+                data = app.chirpShift(t, data, t0);
             end
             % Wavelength region masks (applied last so they survive
             % chirp interpolation).
@@ -1097,6 +1307,26 @@ classdef TRSpecAnalyzer < handle
                     end
                 end
             end
+            % A solvent view of the main window (setSolvView): what the
+            % Coherence window subtracts from its residual is subtracted
+            % from the data themselves, in the same time window, or the
+            % whole solvent signal is, at all delays.
+            if app.solvData
+                data = data - app.solventInData();
+            end
+            % Anisotropy: the perpendicular data get the same corrections;
+            % the working data are the chosen view of the two.
+            if app.aniOn && isequal(size(app.perpStage), size(data))
+                perp = app.pipeOn(app.perpStage, app.pipeState(), app.delay);
+                % (a time zero that differs between the two measurements)
+                app.aniPerp0 = perp;
+                perp = app.shiftRowsKept(perp, app.delay, app.aniShift);
+                app.aniPar = data;  app.aniPerp = perp;
+                [data, app.aniGUsed] = app.aniCombine(data, perp, app.delay, ...
+                    app.aniView, app.aniG, app.aniTail, app.aniTailT, app.aniThr);
+            else
+                app.aniPar = [];  app.aniPerp = [];  app.aniPerp0 = [];
+            end
             % Single choke point for every correction (background, chirp,
             % masks): if the rebuilt working data differs from what the
             % analyses were run on, their windows and results are stale.
@@ -1107,8 +1337,2971 @@ classdef TRSpecAnalyzer < handle
             end
         end
         
-        function base = getChirpBaseData(app)
+        % =================================================================
+        % Reference data set: data - scale * reference(t - shift)
+        % =================================================================
+        function clearReference(app)
+            % No reference data set (new data, session about to be read).
+            app.refOrig = [];  app.refDesc = '';  app.refStage = [];
+            app.subApplied = false;  app.subScale = 1;  app.subShift = 0;
+            app.subBaked = false;    app.baseRebased = false;
+            app.solvOn = false;  app.solvA = 1;  app.solvShift = 0;
+            app.solvBand = [NaN NaN];  app.solvBandUnit = 'cm-1';
+            app.solvWL = [NaN NaN];    app.solvMaxShift = NaN;
+            app.solvData = false;  app.solvDataA = 1;  app.solvDataShift = 0;
+            app.solvDataWin = [NaN NaN];  app.solvDataPad = 0;
+            app.solvView = 'data';  app.solvStore = struct();
+        end
+        
+        function markRebased(app)
+            % deltaA_raw was replaced by corrected data (crop, signal
+            % conversion, corrections of Auto Analysis): a subtracted
+            % reference is part of it from now on.
+            if app.subApplied, app.subBaked = true; end
+            app.subApplied  = false;
+            app.baseRebased = true;
+            % (a solvent view that is shown is part of the data from now
+            % on, like the corrections: nothing is left to subtract, and
+            % there are no views any more)
+            if app.solvData
+                app.solvOn = false;  app.solvA = 0;
+                app.solvDataWin = [NaN NaN];
+            end
+            app.solvData = false;  app.solvView = 'data';
+            app.solvStore = struct();
+            app.updateRefStage();
+            app.updatePerpStage();
+        end
+        
+        function p = pipeState(app)
+            %PIPESTATE  The corrections in force (background, chirp,
+            %   masks) as a struct that pipeOn can apply to any data set
+            %   on the present axes.
+            n = numel(app.wavelength);
+            p = struct('bgOn', false, 'bgN', 0, 'bg', [], ...
+                'chirpOn', false, 't0', [], ...
+                'nanRows', false(n, 1), 'zeroRows', false(n, 1));
+            if app.bgApplied && ~isempty(app.bgSpectrum)
+                p.bgOn = true;  p.bgN = app.bgN;  p.bg = app.bgSpectrum(:);
+            end
+            if app.chirpApplied && ~isempty(app.chirpParams)
+                p.chirpOn = true;
+                p.t0 = app.chirpModel(app.chirpParams, app.wavelength(:));
+            end
+            for k = 1:size(app.maskedRegions, 1)
+                mRow = app.wavelength(:) >= app.maskedRegions{k, 1} & ...
+                       app.wavelength(:) <= app.maskedRegions{k, 2};
+                if strcmp(app.maskedRegions{k, 3}, 'nan')
+                    p.nanRows = p.nanRows | mRow;  p.zeroRows = p.zeroRows & ~mRow;
+                else
+                    p.zeroRows = p.zeroRows | mRow;  p.nanRows = p.nanRows & ~mRow;
+                end
+            end
+        end
+        
+        function e = autoLogEntry(~, P)
+            %AUTOLOGENTRY  The corrections of an Auto Analysis run (P) in
+            %   the form pipeOn applies.
+            n = numel(P.wlIn);
+            e = struct('bgOn', strcmp(P.bgStatus, 'applied'), ...
+                'bgN', P.nBg, 'bg', P.bg(:), ...
+                'chirpOn', strcmp(P.chirp.status, 'applied'), 't0', [], ...
+                'nanRows', false(n, 1), 'zeroRows', false(n, 1));
+            if e.chirpOn, e.t0 = P.chirp.t0(:); end
+            e.nanRows(P.maskRows) = true;
+        end
+        
+        function X = pipeOn(app, X, p, t)
+            %PIPEON  Apply the corrections p to another data set X measured
+            %   on the same axes (delays t): its OWN average of the first
+            %   p.bgN delays as background (the stored spectrum when no
+            %   number of delays is known), the same time-zero curve, the
+            %   same masked rows.
+            if p.bgOn
+                if p.bgN >= 1
+                    b = app.autoNanMean(X(:, 1:p.bgN), 2);
+                    b(~isfinite(b)) = 0;
+                else
+                    b = p.bg;
+                end
+                X = X - b;
+            end
+            if p.chirpOn
+                X = app.chirpShift(t, X, p.t0);
+            end
+            X(p.nanRows, :)  = NaN;
+            X(p.zeroRows, :) = 0;
+        end
+        
+        function logRebase(app, wlMask, tMask)
+            %LOGREBASE  Record the step that is about to make corrected
+            %   data the starting point: the corrections in force, then
+            %   those of an Auto Analysis run being applied, then the crop.
+            e = struct('op', 'crop', 'pipe', app.pipeState(), ...
+                'auto', [], 't', app.delay(:).', ...
+                'wlMask', logical(wlMask(:)), 'tMask', logical(tMask(:).'));
+            if ~isempty(app.pendingAuto), e.auto = app.pendingAuto; end
+            app.pendingAuto = [];
+            app.corrLog{end+1} = e;
+        end
+        
+        function [X, ok] = replayCorrections(app, X)
+            %REPLAYCORRECTIONS  Bring a data set measured on the axes of
+            %   the loaded data to the stage of deltaA_raw: every logged
+            %   step is applied to it, in order.
+            ok = app.corrLogOK && isequal(size(X), size(app.originalDeltaA));
+            if ~ok, return; end
+            for k = 1:numel(app.corrLog)
+                e = app.corrLog{k};
+                switch e.op
+                    case 'crop'
+                        X = app.pipeOn(X, e.pipe, e.t);
+                        if ~isempty(e.auto)
+                            X = app.pipeOn(X, e.auto, e.t);
+                        end
+                        X = X(e.wlMask, e.tMask);
+                    case 'conv'
+                        X = app.convertSignal(X, e.from, e.to, e.unit);
+                end
+            end
+        end
+        
+        function tf = logHasConversion(app)
+            tf = false;
+            for k = 1:numel(app.corrLog)
+                if strcmp(app.corrLog{k}.op, 'conv'), tf = true;  return; end
+            end
+        end
+        
+        function updateRefStage(app)
+            % The reference at the stage of deltaA_raw (empty when it
+            % cannot be brought there).
+            app.refStage = [];
+            if isempty(app.refOrig), return; end
+            [X, ok] = app.replayCorrections(app.refOrig);
+            if ok && isequal(size(X), size(app.deltaA_raw))
+                app.refStage = X;
+            end
+        end
+        
+        function [tf, why] = subAllowed(app)
+            %SUBALLOWED  Can a reference be subtracted from the present
+            %   starting data? why: the reason when it cannot.
+            tf = false;  why = '';
+            if app.aniOn
+                why = ['Perpendicular data are loaded (anisotropy): a ' ...
+                    'reference cannot be subtracted here. Subtract it from ' ...
+                    'each polarization first, save the two results with ' ...
+                    '"Export Corrected Data...", and load those.'];
+            elseif app.solvData
+                why = ['A view without the solvent is shown ("View" of ' ...
+                    'the main window), made with this reference. Choose ' ...
+                    'the view "Data" first; the subtraction here can be ' ...
+                    'changed after that.'];
+            elseif app.subBaked
+                why = ['A reference was subtracted before the data were ' ...
+                    'cropped, converted or corrected by Auto Analysis: it ' ...
+                    'is part of the data now. Press "Reset all" in the ' ...
+                    'main window to change the subtraction.'];
+            elseif ~app.corrLogOK
+                why = ['This session was saved by an earlier version, ' ...
+                    'after a crop: the steps made since loading are not ' ...
+                    'recorded, so a reference cannot be brought to the ' ...
+                    'same state. Press "Reset all" in the main window, ' ...
+                    'subtract the reference, then repeat the corrections.'];
+            elseif app.logHasConversion()
+                why = app.uiStr(['The data were converted (\DeltaA <-> ' ...
+                    '\DeltaT/T) after loading: a reference cannot be ' ...
+                    'subtracted from them. Press "Reset all" in the main ' ...
+                    'window, subtract the reference, then convert.']);
+            else
+                tf = true;
+            end
+        end
+        
+        function base = pipelineBase(app)
+            %PIPELINEBASE  Data the corrections start from: deltaA_raw,
+            %   minus the reference data set if one is subtracted.
             base = app.deltaA_raw;
+            if app.subApplied && isequal(size(app.refStage), size(base))
+                base = base - app.subScale * ...
+                    app.shiftRowsKept(app.refStage, app.delay, app.subShift);
+            end
+        end
+        
+        function Y = shiftRows(app, X, t, d)
+            %SHIFTROWS  X(t - d) along the delays (the columns), by
+            %   interpRuns: a cubic spline through the points of every row
+            %   inside the stretches of equally spaced delays, linear
+            %   between the other delays; beyond the two ends the first /
+            %   last value is held. d > 0 moves the features to later
+            %   delays.
+            %   A spline keeps sharp features and oscillations that linear
+            %   interpolation would flatten; where the delay step jumps it
+            %   would overshoot, so it is used only where the delays are
+            %   equally spaced. Empty values (NaN) stay where they are: the
+            %   result is empty where a delay next to t - d is empty.
+            sz = size(X);
+            t  = t(:);
+            n  = numel(t);
+            if d == 0 || n < 2, Y = X;  return; end
+            X2 = reshape(X, [], n);
+            tq = min(max(t - d, t(1)), t(end));
+            Y  = NaN(size(X2));
+            full = all(isfinite(X2), 2);
+            if any(full)
+                Y(full, :) = app.interpRuns(t, X2(full, :), tq.');
+            end
+            if ~all(full)
+                % interval of every query: t(iq) <= tq <= t(iq + 1)
+                iq  = min(max(interp1(t, (1:n).', tq, 'previous'), 1), n - 1);
+                onL = tq == t(iq);
+                onR = tq == t(iq + 1);
+                for ii = find(~full).'
+                    row = X2(ii, :).';
+                    m = isfinite(row);
+                    if nnz(m) < 2, continue; end
+                    y = app.interpRuns(t(m), row(m).', tq.');
+                    y = y(:);
+                    % empty unless both neighbors are measured (on a
+                    % delay: unless that delay is)
+                    ok = (m(iq) | onR) & (m(iq + 1) | onL);
+                    y(~ok) = NaN;
+                    Y(ii, :) = y.';
+                end
+            end
+            Y = reshape(Y, sz);
+        end
+        
+        function Y = shiftRowsKept(app, X, t, d)
+            %SHIFTROWSKEPT  shiftRows for the corrections of the main
+            %   window, which are rebuilt at every redraw: the result of
+            %   the last calls is kept (cachedCalc).
+            if d == 0, Y = X;  return; end
+            Y = app.cachedCalc('shift', ...
+                @(a, b, c) app.shiftRows(b, a, c), t(:), X, d);
+        end
+        
+        function runs = delayRuns(~, t)
+            %DELAYRUNS  Stretches of the delay axis with equal steps.
+            %   runs(k, :) = [first last] index of a stretch of at least 4
+            %   delays whose steps all lie within 10 % of the first step
+            %   of the stretch.
+            t = t(:).';
+            n = numel(t);
+            runs = zeros(0, 2);
+            if n < 4, return; end
+            d = diff(t);
+            a = 1;
+            for i = 2:n                  % step i is d(i); i = n closes
+                if i == n || ~(abs(d(i) - d(a)) <= 0.10 * abs(d(a)))
+                    if i - a >= 3
+                        runs(end + 1, :) = [a, i]; %#ok<AGROW>
+                    end
+                    a = i;
+                end
+            end
+        end
+        
+        function M = splineCurv(~, x, Y)
+            %SPLINECURV  Second derivatives at the delays x of the cubic
+            %   spline through the rows of Y (rows x numel(x), at least 4
+            %   delays), with the not-a-knot ends of spline().
+            %   The spline is evaluated from them in interpRuns, for all
+            %   rows at once and each row at its own delays.
+            x = x(:);
+            n = numel(x);
+            h = diff(x);
+            D = diff(Y, 1, 2) ./ h.';            % slopes of the chords
+            R = zeros(n, size(Y, 1));
+            R(2:n-1, :) = 6 * (D(:, 2:n-1) - D(:, 1:n-2)).';
+            % h(i-1) M(i-1) + 2 (h(i-1) + h(i)) M(i) + h(i) M(i+1) = R(i);
+            % first and last row: the third derivative is continuous at
+            % the second and at the last but one delay.
+            i = [2:n-1, 2:n-1, 2:n-1, 1, 1, 1, n, n, n];
+            j = [1:n-2, 2:n-1, 3:n, 1, 2, 3, n-2, n-1, n];
+            v = [h(1:n-2).', 2 * (h(1:n-2) + h(2:n-1)).', h(2:n-1).', ...
+                 h(2), -(h(1) + h(2)), h(1), ...
+                 h(n-1), -(h(n-2) + h(n-1)), h(n-2)];
+            A = sparse(i, j, v, n, n);
+            M = full(A \ R).';
+        end
+        
+        function Yq = interpRuns(app, t, Y, Tq)
+            %INTERPRUNS  The rows of Y (rows x delays, no empty values) at
+            %   the delays Tq (one row of delays for all rows of Y, or one
+            %   row for each).
+            %   Between two delays the values are interpolated linearly.
+            %   Inside every stretch of equally spaced delays (delayRuns)
+            %   they come from a cubic spline through the delays of that
+            %   stretch instead: a spline keeps oscillations and sharp
+            %   features that linear interpolation flattens, but it must
+            %   not run across a jump of the delay step, where it would
+            %   overshoot. Empty (NaN) outside the measured delays.
+            t  = t(:).';
+            n  = numel(t);
+            nr = size(Y, 1);
+            if size(Tq, 1) == 1 && nr > 1
+                Tq = repmat(Tq, nr, 1);
+            end
+            Yq = NaN(size(Tq));
+            if n < 2 || nr == 0, return; end
+            in = Tq >= t(1) & Tq <= t(n);
+            if ~any(in(:)), return; end
+            [ri, ~] = find(in);
+            ri = ri(:);
+            q  = Tq(in);
+            q  = q(:);
+            % interval of every query: t(k) <= q <= t(k + 1)
+            k  = floor(interp1(t, 1:n, q));
+            k  = min(max(k(:), 1), n - 1);
+            h  = diff(t);
+            tk = t(k);        tk = tk(:);
+            hk = h(k);        hk = hk(:);
+            i0 = ri + (k - 1) * nr;              % Y(ri, k) is Y(i0)
+            y0 = Y(i0);       y0 = y0(:);
+            y1 = Y(i0 + nr);  y1 = y1(:);
+            b  = (q - tk) ./ hk;
+            y  = y0 + b .* (y1 - y0);
+            runs = app.delayRuns(t);
+            for r = 1:size(runs, 1)
+                a = runs(r, 1);
+                e = runs(r, 2);
+                s = find(q >= t(a) & q <= t(e));
+                if isempty(s), continue; end
+                M  = app.splineCurv(t(a:e), Y(:, a:e));
+                ks = min(max(k(s), a), e - 1);
+                rs = ri(s);
+                hs = h(ks);       hs = hs(:);
+                ts = t(ks);       ts = ts(:);
+                bb = (q(s) - ts) ./ hs;
+                aa = 1 - bb;
+                j0 = rs + (ks - 1) * nr;         % in Y
+                m0 = rs + (ks - a) * nr;         % in M
+                ya = Y(j0);       ya = ya(:);
+                yb = Y(j0 + nr);  yb = yb(:);
+                ma = M(m0);       ma = ma(:);
+                mb = M(m0 + nr);  mb = mb(:);
+                y(s) = aa .* ya + bb .* yb + ...
+                    ((aa .^ 3 - aa) .* ma + (bb .^ 3 - bb) .* mb) ...
+                    .* hs .^ 2 / 6;
+            end
+            Yq(in) = y;
+        end
+        
+        function Y = chirpShift(app, t, X, t0)
+            %CHIRPSHIFT  The chirp correction of the rows of X (wavelength
+            %   x delay): row i at the delays t + t0(i), by interpRuns.
+            %   Empty (NaN) where t + t0 lies outside the measured delays,
+            %   where t0 is not a number and, for a row with empty values,
+            %   where a delay next to t + t0 is empty.
+            %   The result of the last calls is kept (cachedCalc).
+            Y = app.cachedCalc('chirp', ...
+                @(a, b, c) app.chirpShiftCalc(a, b, c), t(:).', X, t0(:));
+        end
+        
+        function Y = chirpShiftCalc(app, t, X, t0)
+            %CHIRPSHIFTCALC  The calculation of chirpShift (t a row, t0 a
+            %   column).
+            Y = NaN(size(X));
+            okT  = isfinite(t0);
+            full = okT & all(isfinite(X), 2);
+            if any(full)
+                Y(full, :) = app.interpRuns(t, X(full, :), t + t0(full));
+            end
+            for i = find(okT & ~full).'
+                row = X(i, :);
+                m = isfinite(row);
+                if nnz(m) < 2, continue; end
+                tq  = t + t0(i);
+                % (linear: where a value can be given at all)
+                lin = interp1(t, row, tq, 'linear', NaN);
+                sp  = app.interpRuns(t(m), row(m), tq);
+                use = isfinite(lin);
+                lin(use) = sp(use);
+                Y(i, :) = lin;
+            end
+        end
+        
+        function Y = cachedCalc(app, kind, fcn, a, b, c)
+            %CACHEDCALC  fcn(a, b, c), or the result kept from an earlier
+            %   call of the same kind with the same three arguments.
+            %   The corrections of the main window are rebuilt at every
+            %   redraw (recompute); an interpolation of the whole data set
+            %   is not repeated for that. The four last results are kept;
+            %   they are not saved.
+            C = app.calcCache;
+            for i = 1:numel(C)
+                if strcmp(C(i).kind, kind) && isequaln(C(i).a, a) && ...
+                        isequaln(C(i).c, c) && isequaln(C(i).b, b)
+                    Y = C(i).out;
+                    if i > 1
+                        app.calcCache = C([i, 1:i-1, i+1:numel(C)]);
+                    end
+                    return;
+                end
+            end
+            Y = fcn(a, b, c);
+            E = struct('kind', kind, 'a', a, 'b', b, 'c', c, 'out', Y);
+            if isempty(C)
+                app.calcCache = E;
+            else
+                app.calcCache = [E, C(1:min(numel(C), 3))];
+            end
+        end
+        
+        function [c, s] = subCost(app, S, R, t, tMask, d)
+            %SUBCOST  Sum of squares of S - s*R(t - d) in the delays tMask,
+            %   with the factor s that makes it smallest.
+            Rd = app.shiftRows(R, t, d);
+            a = S(:, tMask);  b = Rd(:, tMask);
+            ok = isfinite(a) & isfinite(b);
+            a = a(ok);  b = b(ok);
+            den = sum(b .^ 2);
+            if isempty(a) || den <= 0
+                s = 0;  c = sum(a .^ 2);  return;
+            end
+            s = sum(a .* b) / den;
+            c = sum((a - s * b) .^ 2);
+        end
+        
+        function [s, d, c0, c1] = fitSubtraction(app, S, R, t, tMask, doShift, maxShift)
+            %FITSUBTRACTION  Factor s and time shift d of the reference R
+            %   that fit the data S best (least squares) in the delays
+            %   tMask:  S ~ s * R(t - d).  S and R: the chosen wavelengths.
+            %   doShift = false: d = 0. Otherwise d is searched in
+            %   [-maxShift, maxShift]: 41 equally spaced values, then a
+            %   golden-section search between the neighbors of the best
+            %   one (60 steps).
+            %   c0, c1: sum of squares before and after the subtraction.
+            a = S(:, tMask);
+            c0 = sum(a(isfinite(a)) .^ 2);
+            d = 0;
+            if doShift && maxShift > 0
+                g  = linspace(-maxShift, maxShift, 41);
+                cg = zeros(size(g));
+                for k = 1:numel(g)
+                    cg(k) = app.subCost(S, R, t, tMask, g(k));
+                end
+                [~, i] = min(cg);
+                lo = g(max(i - 1, 1));  hi = g(min(i + 1, numel(g)));
+                gr = (sqrt(5) - 1) / 2;
+                x1 = hi - gr * (hi - lo);  x2 = lo + gr * (hi - lo);
+                f1 = app.subCost(S, R, t, tMask, x1);
+                f2 = app.subCost(S, R, t, tMask, x2);
+                for k = 1:60
+                    if f1 <= f2
+                        hi = x2;  x2 = x1;  f2 = f1;
+                        x1 = hi - gr * (hi - lo);
+                        f1 = app.subCost(S, R, t, tMask, x1);
+                    else
+                        lo = x1;  x1 = x2;  f1 = f2;
+                        x2 = lo + gr * (hi - lo);
+                        f2 = app.subCost(S, R, t, tMask, x2);
+                    end
+                end
+                d = (lo + hi) / 2;
+            end
+            [c1, s] = app.subCost(S, R, t, tMask, d);
+        end
+        
+        function [ok, msg] = setReference(app, wl, t, A, desc)
+            %SETREFERENCE  Take a parsed file as the reference data set.
+            %   Its axes must be those of the loaded data, as parsed or
+            %   with the two axes interchanged (as "Transpose axes" does).
+            ok = false;  msg = '';
+            if app.solvData
+                msg = ['A view without the solvent is shown ("View" of ' ...
+                    'the main window), made with the file loaded now. ' ...
+                    'Choose the view "Data" first, then load another file.'];
+                return;
+            end
+            wl0 = app.originalWavelength(:);  t0 = app.originalDelay(:).';
+            wl = wl(:);  t = t(:).';
+            if ~app.sameAxis(wl, wl0) || ~app.sameAxis(t, t0)
+                wlT = t(:);  tT = wl(:).';  AT = A.';
+                [wlT, iw] = sort(wlT);  AT = AT(iw, :);
+                [tT,  it] = sort(tT);   AT = AT(:,  it);
+                if app.sameAxis(wlT, wl0) && app.sameAxis(tT, t0)
+                    A = AT;
+                else
+                    msg = sprintf(['The axes of this file differ from those ' ...
+                        'of the loaded data (%d x %d points here, %d x %d ' ...
+                        'in the data). A reference must be measured at the ' ...
+                        'same wavelengths and delays.'], ...
+                        numel(wl), numel(t), numel(wl0), numel(t0));
+                    return;
+                end
+            end
+            app.refOrig = A;
+            app.refDesc = desc;
+            app.solvOn  = false;       % the factor found belongs to the old file
+            app.clearSolvDef();
+            app.updateRefStage();
+            ok = true;
+        end
+        
+        function tf = sameAxis(~, a, b)
+            % Two axes hold the same values (to 1e-6 of their span).
+            tf = numel(a) == numel(b);
+            if ~tf || isempty(a), return; end
+            a = a(:);  b = b(:);
+            tol = 1e-6 * max(max(abs(b)) - min(abs(b)), max(abs(b)));
+            tf = all(abs(a - b) <= tol);
+        end
+        
+        function applySubtraction(app, on, scale, shift)
+            %APPLYSUBTRACTION  Switch the subtraction of the reference on
+            %   (with these values) or off, and rebuild the working data.
+            if on && (isempty(app.refStage) || ~app.subAllowed()), return; end
+            if app.solvData, return; end
+            % The factor of the solvent coherence (Coherence window) was
+            % found on the data as they were. It does not hold for data
+            % with another subtraction.
+            if logical(on) ~= app.subApplied || ...
+                    (on && (scale ~= app.subScale || shift ~= app.subShift))
+                app.solvOn = false;
+                app.clearSolvDef();
+            end
+            app.subApplied = logical(on);
+            if on
+                app.subScale = scale;
+                app.subShift = shift;
+            end
+            % A background taken from the first N delays follows the
+            % data the corrections start from.
+            if app.bgApplied && app.bgN > 0
+                pb = app.pipelineBase();
+                app.bgSpectrum = mean(pb(:, 1:app.bgN), 2, 'omitnan');
+            end
+            app.updateAll();
+            app.updateStatusLabel();
+        end
+        
+        function openSubtractWindow(app)
+            %OPENSUBTRACTWINDOW  Subtract a reference data set (solvent,
+            %   substrate):  data - scale * reference(t - shift).
+            %   Modal: the main window cannot change underneath it.
+            if isempty(app.deltaA_raw)
+                uialert(app.fig, 'Load data first.', 'No data');  return;
+            end
+            f = uifigure('Name', 'Subtract Data', ...
+                'Position', app.fitFigurePosition(960, 680), ...
+                'WindowStyle', 'modal');
+            app.applyLightTheme(f);
+            gl = uigridlayout(f, [7, 1]);
+            gl.RowHeight  = {30, 30, 30, 30, '1x', 'fit', 36};
+            gl.Padding    = [10 10 10 10];
+            gl.RowSpacing = 6;
+            
+            % ---- row 1: the file ----
+            r1 = uigridlayout(gl, [1, 2]);
+            r1.ColumnWidth = {150, '1x'};  r1.Padding = [0 0 0 0];
+            btnLoad = uibutton(r1, 'Text', 'Load reference...', ...
+                'Tooltip', ['Data file of the solvent or substrate alone, ' ...
+                    'measured at the same wavelengths and delays.'], ...
+                'ButtonPushedFcn', @(~,~) onLoad());
+            lblFile = uilabel(r1, 'Text', '', 'FontColor', [0.2 0.2 0.2]);
+            
+            % ---- row 2: factor and shift ----
+            r2 = uigridlayout(gl, [1, 7]);
+            r2.ColumnWidth = {'fit', 100, 'fit', 100, 130, 170, '1x'};
+            r2.Padding = [0 0 0 0];  r2.ColumnSpacing = 6;
+            uilabel(r2, 'Text', 'Scale:', 'HorizontalAlignment', 'right');
+            edScale = uieditfield(r2, 'numeric', 'Value', app.subScale, ...
+                'ValueDisplayFormat', '%.6g', ...
+                'Tooltip', ['Factor of the reference. Below 1 when the ' ...
+                    'sample absorbs part of the pump.']);
+            uilabel(r2, 'Text', sprintf('Time shift (%s):', app.tUnitTxt()), ...
+                'HorizontalAlignment', 'right');
+            edShift = uieditfield(r2, 'numeric', 'Value', app.subShift, ...
+                'ValueDisplayFormat', '%.6g', ...
+                'Tooltip', ['Shift of the reference in time. Positive: ' ...
+                    'the reference is moved to later delays.']);
+            btnEstS = uibutton(r2, 'Text', 'Estimate scale', ...
+                'Tooltip', ['Least-squares factor in the range given ' ...
+                    'below, with the time shift as entered.'], ...
+                'ButtonPushedFcn', @(~,~) onEstimate(false));
+            btnEstB = uibutton(r2, 'Text', 'Estimate scale + shift', ...
+                'Tooltip', ['Least-squares factor and time shift in the ' ...
+                    'range given below.'], ...
+                'ButtonPushedFcn', @(~,~) onEstimate(true));
+            uilabel(r2, 'Text', '');
+            
+            % ---- row 3: range used by the estimate ----
+            r3 = uigridlayout(gl, [1, 11]);
+            r3.ColumnWidth = {'fit', 80, 'fit', 80, 'fit', 80, 'fit', 80, ...
+                              'fit', 80, '1x'};
+            r3.Padding = [0 0 0 0];  r3.ColumnSpacing = 6;
+            wl = app.wavelength(:);  t = app.delay(:).';
+            dtm = median(diff(t));
+            if isempty(dtm) || ~isfinite(dtm) || dtm <= 0, dtm = 1; end
+            uilabel(r3, 'Text', app.uiStr('Estimate in  \lambda from:'), ...
+                'HorizontalAlignment', 'right');
+            edW1 = uieditfield(r3, 'numeric', 'Value', min(wl), ...
+                'ValueDisplayFormat', '%.6g');
+            uilabel(r3, 'Text', 'to:', 'HorizontalAlignment', 'right');
+            edW2 = uieditfield(r3, 'numeric', 'Value', max(wl), ...
+                'ValueDisplayFormat', '%.6g');
+            uilabel(r3, 'Text', 't from:', 'HorizontalAlignment', 'right');
+            edT1 = uieditfield(r3, 'numeric', 'Value', t(1), ...
+                'ValueDisplayFormat', '%.6g');
+            uilabel(r3, 'Text', 'to:', 'HorizontalAlignment', 'right');
+            edT2 = uieditfield(r3, 'numeric', 'Value', t(end), ...
+                'ValueDisplayFormat', '%.6g');
+            uilabel(r3, 'Text', 'Largest shift:', 'HorizontalAlignment', 'right');
+            edMax = uieditfield(r3, 'numeric', 'Value', 10 * dtm, ...
+                'Limits', [0 Inf], 'ValueDisplayFormat', '%.6g', ...
+                'Tooltip', ['"Estimate scale + shift" looks for the shift ' ...
+                    'between minus and plus this value.']);
+            uilabel(r3, 'Text', '');
+            
+            % ---- row 4: where the two plots look ----
+            r4 = uigridlayout(gl, [1, 5]);
+            r4.ColumnWidth = {'fit', 100, 'fit', 100, '1x'};
+            r4.Padding = [0 0 0 0];  r4.ColumnSpacing = 6;
+            uilabel(r4, 'Text', app.uiStr('Kinetics at \lambda:'), ...
+                'HorizontalAlignment', 'right');
+            edPW = uieditfield(r4, 'numeric', 'Value', app.selWL, ...
+                'ValueDisplayFormat', '%.6g');
+            uilabel(r4, 'Text', 'Spectrum at t:', 'HorizontalAlignment', 'right');
+            edPT = uieditfield(r4, 'numeric', 'Value', app.selT, ...
+                'ValueDisplayFormat', '%.6g');
+            uilabel(r4, 'Text', ['(the kinetics are drawn over the range ' ...
+                '"t from ... to" above)'], 'FontAngle', 'italic', ...
+                'FontColor', [0.45 0.45 0.45]);
+            
+            % ---- row 5: plots ----
+            pg = uigridlayout(gl, [1, 2]);
+            pg.Padding = [0 0 0 0];  pg.ColumnSpacing = 8;
+            axK = app.boxAxes(pg, [56 14 24 40]);
+            axS = app.boxAxes(pg, [56 14 24 40]);
+            
+            % ---- row 6: message; row 7: buttons ----
+            lblMsg = uilabel(gl, 'Text', '', 'WordWrap', 'on', ...
+                'FontColor', [0.25 0.25 0.25]);
+            bot = uigridlayout(gl, [1, 4]);
+            bot.ColumnWidth = {'1x', 110, 160, 90};  bot.Padding = [0 0 0 0];
+            uilabel(bot, 'Text', '');
+            btnApply = uibutton(bot, 'Text', 'Apply', ...
+                'BackgroundColor', [0.30 0.65 0.35], 'FontColor', 'w', ...
+                'ButtonPushedFcn', @(~,~) onApply());
+            btnOff = uibutton(bot, 'Text', 'Remove subtraction', ...
+                'ButtonPushedFcn', @(~,~) onRemove());
+            uibutton(bot, 'Text', 'Close', ...
+                'ButtonPushedFcn', @(~,~) delete(f));
+            
+            ctl = {edScale, edShift, edW1, edW2, edT1, edT2, edPW, edPT};
+            for q = 1:numel(ctl)
+                ctl{q}.ValueChangedFcn = @(~,~) drawPreview();
+            end
+            refresh('');
+            
+            function refresh(msg)
+                [canUse, why] = app.subAllowed();
+                hasRef = ~isempty(app.refStage) && ...
+                    isequal(size(app.refStage), size(app.deltaA_raw));
+                if isempty(app.refOrig)
+                    lblFile.Text = 'No reference loaded.';
+                else
+                    lblFile.Text = sprintf('%s   (%d x %d)', app.refDesc, ...
+                        size(app.refOrig, 1), size(app.refOrig, 2));
+                end
+                en = app.pick(canUse && hasRef, 'on', 'off');
+                btnLoad.Enable  = app.pick(canUse, 'on', 'off');
+                btnEstS.Enable  = en;  btnEstB.Enable = en;
+                btnApply.Enable = en;
+                btnOff.Enable   = app.pick(app.subApplied && ~app.solvData, ...
+                    'on', 'off');
+                if ~canUse
+                    msg = why;
+                elseif isempty(msg)
+                    if app.subApplied
+                        msg = sprintf(['Subtracted now: data - %.6g x ' ...
+                            'reference, time shift %.6g %s.'], app.subScale, ...
+                            app.subShift, app.tUnitTxt());
+                    elseif hasRef
+                        msg = ['Nothing is subtracted yet. Set the scale ' ...
+                            'and the time shift, or estimate them, then ' ...
+                            'press Apply.'];
+                    elseif app.baseRebased
+                        msg = ['Load the file of the solvent or substrate ' ...
+                            'alone, as measured. The corrections made so ' ...
+                            'far (background, chirp, masks, crop) are ' ...
+                            'applied to it before it is subtracted.'];
+                    else
+                        msg = ['Load the file of the solvent or substrate ' ...
+                            'alone. The subtraction is made before ' ...
+                            'background and chirp correction.'];
+                    end
+                end
+                lblMsg.Text = msg;
+                drawPreview();
+            end
+            
+            function [iw, it] = previewIdx()
+                [~, iw] = min(abs(app.wavelength(:) - edPW.Value));
+                [~, it] = min(abs(app.delay(:) - edPT.Value));
+            end
+            
+            function drawPreview()
+                app.claAll(axK);  app.claAll(axS);
+                [iw, it] = previewIdx();
+                tt = app.delay(:).';  ww = app.wavelength(:);
+                D = app.deltaA_raw;
+                hasRef = ~isempty(app.refStage) && isequal(size(app.refStage), size(D));
+                hold(axK, 'on');  hold(axS, 'on');
+                hk = plot(axK, tt, D(iw, :), '-', 'Color', [0.10 0.35 0.75], ...
+                    'LineWidth', 1.2, 'DisplayName', 'Data');
+                hs = plot(axS, ww, D(:, it), '-', 'Color', [0.10 0.35 0.75], ...
+                    'LineWidth', 1.2, 'DisplayName', 'Data');
+                if hasRef && app.subAllowed()
+                    Rs = edScale.Value * app.shiftRows(app.refStage, tt, edShift.Value);
+                    hk(2) = plot(axK, tt, Rs(iw, :), '-', 'Color', [0.55 0.55 0.55], ...
+                        'LineWidth', 1.0, 'DisplayName', 'Reference x scale');
+                    hk(3) = plot(axK, tt, D(iw, :) - Rs(iw, :), '-', ...
+                        'Color', [0.85 0.20 0.15], 'LineWidth', 1.2, ...
+                        'DisplayName', 'Difference');
+                    hs(2) = plot(axS, ww, Rs(:, it), '-', 'Color', [0.55 0.55 0.55], ...
+                        'LineWidth', 1.0, 'DisplayName', 'Reference x scale');
+                    hs(3) = plot(axS, ww, D(:, it) - Rs(:, it), '-', ...
+                        'Color', [0.85 0.20 0.15], 'LineWidth', 1.2, ...
+                        'DisplayName', 'Difference');
+                end
+                yline(axK, 0, 'k:', 'HandleVisibility', 'off');
+                yline(axS, 0, 'k:', 'HandleVisibility', 'off');
+                hold(axK, 'off');  hold(axS, 'off');
+                grid(axK, 'on');  grid(axS, 'on');
+                lo = min(edT1.Value, edT2.Value);  hi = max(edT1.Value, edT2.Value);
+                if hi > lo, xlim(axK, [lo hi]); end
+                xlabel(axK, sprintf('Delay time (%s)', app.tUnitAx()));  ylabel(axK, app.sigName());
+                xlabel(axS, app.xAxLabel());   ylabel(axS, app.sigName());
+                title(axK, sprintf('Kinetics at %.6g %s', ww(iw), app.xUnitAx()));
+                title(axS, sprintf('Spectrum at %.6g %s', tt(it), app.tUnitAx()));
+                legend(axK, hk, 'Location', 'best');
+                legend(axS, hs, 'Location', 'best');
+            end
+            
+            function onLoad()
+                [fn, fp] = uigetfile( ...
+                    {'*.csv;*.dat;*.txt', 'Data (*.csv, *.dat, *.txt)'; ...
+                     '*.*', 'All Files'}, ...
+                    'Select the reference data file', app.startDir());
+                figure(f);
+                if isequal(fn, 0), return; end
+                app.rememberDir(fp);
+                try
+                    [w2, t2, A2] = app.parseDataFile(fullfile(fp, fn));
+                catch ME
+                    refresh(sprintf('Failed to read the file: %s', ME.message));
+                    return;
+                end
+                wasOn = app.subApplied;
+                [ok, msg] = app.setReference(w2, t2, A2, fn);
+                if ~ok, refresh(msg);  return; end
+                if wasOn
+                    % another reference: nothing is subtracted until Apply
+                    app.applySubtraction(false, 1, 0);
+                end
+                refresh('');
+            end
+            
+            function onEstimate(withShift)
+                wMask = app.wavelength(:) >= min(edW1.Value, edW2.Value) & ...
+                        app.wavelength(:) <= max(edW1.Value, edW2.Value);
+                tMask = app.delay(:).' >= min(edT1.Value, edT2.Value) & ...
+                        app.delay(:).' <= max(edT1.Value, edT2.Value);
+                if nnz(wMask) < 1 || nnz(tMask) < 2
+                    refresh('The range of the estimate holds too few points.');
+                    return;
+                end
+                S = app.deltaA_raw(wMask, :);  R = app.refStage(wMask, :);
+                if withShift
+                    [sc, sh, c0, c1] = app.fitSubtraction(S, R, app.delay, ...
+                        tMask, true, edMax.Value);
+                    edShift.Value = sh;
+                else
+                    % with the shift entered
+                    [c1, sc] = app.subCost(S, R, app.delay, tMask, edShift.Value);
+                    a = S(:, tMask);  c0 = sum(a(isfinite(a)) .^ 2);
+                    sh = edShift.Value;
+                end
+                edScale.Value = sc;
+                nPts = max(nnz(isfinite(S(:, tMask))), 1);
+                refresh(sprintf(['Estimate: scale %.6g, time shift %.6g %s. ' ...
+                    'RMS in the range %.4g before, %.4g after the ' ...
+                    'subtraction. Not applied yet.'], sc, sh, app.tUnitTxt(), ...
+                    sqrt(c0 / nPts), sqrt(c1 / nPts)));
+            end
+            
+            function onApply()
+                if isempty(app.refStage) || ~app.subAllowed(), return; end
+                if ~isfinite(edScale.Value) || ~isfinite(edShift.Value)
+                    refresh('Scale and time shift must be numbers.');  return;
+                end
+                try
+                    app.applySubtraction(true, edScale.Value, edShift.Value);
+                catch ME
+                    refresh(sprintf('Subtraction failed: %s', ME.message));
+                    return;
+                end
+                refresh('');
+            end
+            
+            function onRemove()
+                app.applySubtraction(false, 1, 0);
+                refresh('The subtraction was removed.');
+            end
+        end
+        
+        % =================================================================
+        % Solvent coherence (Coherence window). The vibrational coherence
+        % of the solvent, measured alone, is taken out of the residual
+        % before the FFT:
+        %     residual - A * solvent coherence(t - shift)
+        % A and the shift are fitted in the frequency domain, on the real
+        % and imaginary parts of the Fourier transforms, in a band that
+        % holds a mode of the solvent; they are then applied to the
+        % residual itself (M. Liebel, thesis, Oxford 2014, Fig. 4.6).
+        % =================================================================
+        function Y = solventInData(app, view)
+            %SOLVENTINDATA  What recompute takes out of the data in a
+            %   solvent view of the main window (view: 'osc' | 'all';
+            %   without it the view shown, solvView):
+            %     'osc'  solvDataA x solvent coherence(t - solvDataShift),
+            %            made as the Coherence window makes it (solventVC,
+            %            solventShifted) in the time window solvDataWin:
+            %            the oscillating part of the solvent data. Zero
+            %            outside that window.
+            %     'all'  solvDataA x solvent data(t - solvDataShift) at
+            %            all delays: the whole solvent signal, with the
+            %            corrections of the data (solventData) and the
+            %            time shift of "Subtract data..." (shiftRows).
+            %            Zero where the solvent is not known.
+            %   On the axes of the data. Zero everywhere in the view
+            %   'data' and when it cannot be made (no solvent data at the
+            %   stage of the data, fewer than 8 delays in the window).
+            if nargin < 2, view = app.solvView; end
+            Y = zeros(numel(app.wavelength), numel(app.delay));
+            if isempty(app.refStage) || ...
+                    ~isequal(size(app.refStage), size(Y))
+                return;
+            end
+            if strcmp(view, 'all')
+                try
+                    Ya = app.solvDataA * app.shiftRowsKept( ...
+                        app.solventData(), app.delay, app.solvDataShift);
+                    Ya(~isfinite(Ya)) = 0;
+                    if isequal(size(Ya), size(Y)), Y = Ya; end
+                catch
+                    Y(:) = 0;
+                end
+                return;
+            end
+            if ~strcmp(view, 'osc') || ~all(isfinite(app.solvDataWin))
+                return;
+            end
+            try
+                Vs = app.solventVC(app.solventData(), app.delay, ...
+                    struct('tMin', app.solvDataWin(1), ...
+                    'tMax', app.solvDataWin(2)), app.solvDataPad);
+                Y = app.solvDataA * ...
+                    app.solventShifted(Vs, app.delay, app.solvDataShift);
+            catch
+                Y(:) = 0;
+            end
+        end
+        
+        function tf = solvViewsOK(app)
+            %SOLVVIEWSOK  Are the solvent views of the main window
+            %   available? They are while the solvent coherence is
+            %   subtracted in the Coherence window ("Apply" of its dialog)
+            %   and that analysis has been made with it: its factor, time
+            %   shift and time window are what the views use.
+            tf = app.solvOn && ~app.aniOn && ~isempty(app.refStage) && ...
+                isequal(size(app.refStage), ...
+                    [numel(app.wavelength), numel(app.delay)]) && ...
+                all(isfinite(app.solvDataWin));
+        end
+        
+        function setSolvDef(app, A, shift, win, pad)
+            %SETSOLVDEF  What the solvent views take out of the data:
+            %   the factor A and the time shift the Coherence window
+            %   subtracts with, its time window win = [tMin tMax] and pad,
+            %   the largest shift the coherence is continued for. Called
+            %   by that window (view "Data") whenever it has made the
+            %   subtraction. With other values, what is kept for the two
+            %   solvent views describes other data and is dropped.
+            if app.solvData, return; end
+            new = {A, shift, [min(win), max(win)], max(abs(pad), abs(shift))};
+            old = {app.solvDataA, app.solvDataShift, ...
+                app.solvDataWin(:).', app.solvDataPad};
+            if ~isequaln(new, old)
+                app.solvDataA     = new{1};
+                app.solvDataShift = new{2};
+                app.solvDataWin   = new{3};
+                app.solvDataPad   = new{4};
+                app.solvStore     = struct();
+            end
+            app.updateSignalLabel();
+        end
+        
+        function clearSolvDef(app)
+            %CLEARSOLVDEF  No solvent views (nothing is subtracted in the
+            %   Coherence window any more, or its factor does not hold
+            %   for the data any more).
+            if app.solvData, return; end
+            app.solvDataWin = [NaN NaN];  app.solvDataPad = 0;
+            app.solvStore   = struct();
+            app.updateSignalLabel();
+        end
+        
+        function setSolvView(app, v)
+            %SETSOLVVIEW  What the working data are while the solvent
+            %   coherence is subtracted in the Coherence window:
+            %     'data'  the data with their corrections
+            %     'osc'   without the oscillating part of the solvent, in
+            %             the time window of that analysis (what it
+            %             takes out of its residual)
+            %     'all'   without the whole solvent signal, at all delays
+            %   (solventInData). Another view is other data, so the
+            %   analysis windows close. Their setup and results are kept
+            %   for the view that is left (solvStore) and come back with
+            %   it, as for the anisotropy views (setAniView). A view
+            %   without kept results starts with the setup of the view
+            %   before, and without results.
+            if ~any(strcmp(v, {'data', 'osc', 'all'})) || ...
+                    (~strcmp(v, 'data') && ~app.solvViewsOK())
+                app.updateSignalLabel();  return;
+            end
+            old = app.solvView;
+            if strcmp(v, old)
+                app.updateSignalLabel();  return;
+            end
+            app.closeAnalysisWindows();
+            app.solvStore.(old) = app.takeAnalysisState();
+            app.solvView = v;
+            app.solvData = ~strcmp(v, 'data');
+            hold0 = app.holdDataChange;
+            app.holdDataChange = true;    % (the results are dealt with here)
+            try
+                app.recompute();
+            catch ME
+                app.holdDataChange = hold0;
+                rethrow(ME);
+            end
+            app.holdDataChange = hold0;
+            if isfield(app.solvStore, v)
+                app.putAnalysisState(app.solvStore.(v));
+                app.solvStore = rmfield(app.solvStore, v);
+            else
+                app.clearLiveResults();
+            end
+            % (a color range typed in stays, so that the views can be
+            % compared; an automatic one follows the data of the view)
+            if isempty(app.mapZMin) || isempty(app.mapZMax)
+                app.autoZRange();
+            end
+            app.updateStatusLabel();
+            app.updateAll();
+        end
+        
+        function onViewChoice(app, v)
+            % "View" of the main window: a solvent view or an anisotropy
+            % view (the control holds one set or the other).
+            if any(strcmp(v, {'data', 'osc', 'all'}))
+                app.setSolvView(v);
+            else
+                app.setAniView(v);
+            end
+        end
+        
+        function updateViewControl(app)
+            %UPDATEVIEWCONTROL  "View" of the main window holds the
+            %   anisotropy views while perpendicular data are loaded, the
+            %   solvent views while they exist (solvViewsOK; the two
+            %   never exist together), and is off otherwise.
+            dd = app.ddAniView;
+            if isempty(dd) || ~isvalid(dd), return; end
+            if ~app.aniOn && (app.solvData || app.solvViewsOK())
+                items = {'Data', 'Solvent coherence subtracted', ...
+                         'Solvent signal subtracted'};
+                data  = {'data', 'osc', 'all'};
+                val   = app.solvView;
+                en    = 'on';
+            else
+                items = {'Parallel', 'Perpendicular', 'Magic angle', ...
+                         'Anisotropy r'};
+                data  = {'par', 'perp', 'magic', 'r'};
+                val   = app.aniView;
+                en    = app.pick(app.aniOn, 'on', 'off');
+            end
+            try
+                if ~isequal(dd.ItemsData, data)
+                    dd.Items = items;
+                    dd.ItemsData = data;
+                end
+                dd.Value  = val;
+                dd.Enable = en;
+            catch
+                % (the control did not take the other set of views: it
+                % stays as it was; the title of the map and the text
+                % beside "Signal:" still name the view shown)
+            end
+        end
+
+        function [tf, why] = solvAllowed(app)
+            %SOLVALLOWED  Can the solvent coherence be subtracted in the
+            %   Coherence window? why: the reason when it cannot.
+            tf = false;  why = '';
+            if app.aniOn
+                why = ['Perpendicular data are loaded (anisotropy): the ' ...
+                    'solvent coherence cannot be subtracted here.'];
+                return;
+            end
+            if ~app.corrLogOK
+                why = ['This session was saved by an earlier version, ' ...
+                    'after a crop: the steps made since loading are not ' ...
+                    'recorded, so the solvent data cannot be brought to ' ...
+                    'the same state. Press "Reset all" in the main window ' ...
+                    'and repeat the corrections.'];
+                return;
+            end
+            tf = true;
+        end
+        
+        function Xs = solventData(app)
+            %SOLVENTDATA  The reference (solvent) data set with the
+            %   corrections in force: its own background, the same
+            %   time-zero curve, the same masked rows.
+            Xs = app.pipeOn(app.refStage, app.pipeState(), app.delay);
+        end
+        
+        function [F, freq, info] = cohSpectrum(app, R, t, options)
+            %COHSPECTRUM  Complex one-sided Fourier transform of the
+            %   residual R, made exactly as computeCoherence makes the
+            %   |FFT|^2 map (time window, uniform grid, detrending,
+            %   apodization, zero padding), without normalization.
+            options.normMode = 'none';
+            [P, freq, info] = app.computeCoherence(R, t, options);
+            F = sqrt(P) .* exp(1i * info.Phimap);
+        end
+        
+        function V = solventVC(~, Xs, t, options, maxShift)
+            %SOLVENTVC  Vibrational coherence of the solvent data Xs
+            %   (Nwl x Nt, delays t) for the time window of options.
+            %   The data are put on the uniform grid of the FFT, continued
+            %   on both sides by nPad = ceil(maxShift / step) + 16 points,
+            %   and their smooth part (a polynomial of order 3 fitted in
+            %   the window) is removed. With these points a shift by up
+            %   to maxShift is made from measured values everywhere in
+            %   the window. Where the delays beyond the window are
+            %   missing or sparse, the data are continued by point
+            %   reflection at the last dense delay.
+            %   V: struct with tE (grid), dt, R (Nwl x numel(tE)), w
+            %   (weights that let a subtraction fade out beyond the
+            %   window: 1 inside), nPad, nU (points of the window).
+            t = t(:).';
+            mask = (t >= options.tMin) & (t <= options.tMax);
+            tw = t(mask);
+            if numel(tw) < 8
+                error('Time window is too short (need >= 8 points, got %d).', ...
+                    numel(tw));
+            end
+            dt = median(diff(tw));
+            nU = numel(tw(1):dt:tw(end));
+            if ~isfinite(maxShift), maxShift = 0; end
+            nPad = ceil(abs(maxShift) / dt) + 16;
+            tE = tw(1) + ((-nPad):(nU - 1 + nPad)) * dt;
+            n  = numel(tE);
+            % densely sampled delays around the window (steps up to 1.5 x
+            % the step of the grid)
+            iw1 = find(mask, 1, 'first');  iw2 = find(mask, 1, 'last');
+            while iw1 > 1 && (t(iw1) - t(iw1 - 1)) <= 1.5 * dt, iw1 = iw1 - 1; end
+            while iw2 < numel(t) && (t(iw2 + 1) - t(iw2)) <= 1.5 * dt, iw2 = iw2 + 1; end
+            tLo = t(iw1);  tHi = t(iw2);
+            lo = tE < tLo;  hi = tE > tHi;
+            tq = tE;
+            tq(lo) = 2 * tLo - tq(lo);
+            tq(hi) = 2 * tHi - tq(hi);
+            tq = min(max(tq, tLo), tHi);
+            inW = false(1, n);  inW(nPad + 1 : nPad + nU) = true;
+            tMid  = (tE(nPad + 1) + tE(nPad + nU)) / 2;
+            tHalf = max((tE(nPad + nU) - tE(nPad + 1)) / 2, realmin);
+            x  = (tE(:) - tMid) / tHalf;
+            Pm = [ones(n, 1), x, x.^2, x.^3];
+            Nwl = size(Xs, 1);
+            R = zeros(Nwl, n);
+            for ii = 1:Nwl
+                row = Xs(ii, :);
+                m = isfinite(row);
+                if nnz(m) < 4, continue; end
+                tm = t(m);
+                y = interp1(tm, row(m), min(max(tq, tm(1)), tm(end)), 'linear');
+                yLo = interp1(tm, row(m), min(max(tLo, tm(1)), tm(end)), 'linear');
+                yHi = interp1(tm, row(m), min(max(tHi, tm(1)), tm(end)), 'linear');
+                y(lo) = 2 * yLo - y(lo);
+                y(hi) = 2 * yHi - y(hi);
+                y = y(:);
+                c = Pm(inW, :) \ y(inW);
+                R(ii, :) = (y - Pm * c).';
+            end
+            w = ones(1, n);
+            e = 0.5 * (1 - cos(pi * (1:nPad) / (nPad + 1)));
+            w(1:nPad) = e;  w(n - nPad + 1 : n) = fliplr(e);
+            V = struct('tE', tE, 'dt', dt, 'R', R, 'w', w, 'nPad', nPad, 'nU', nU);
+        end
+        
+        function Y = solventShifted(~, V, t, d)
+            %SOLVENTSHIFTED  The solvent coherence V shifted by d in time,
+            %   V(t - d), on the delays t (0 outside the grid of V).
+            %   d > 0 moves it to later delays. Whole steps of the grid
+            %   are moved as they are; the fraction of a step is made by
+            %   band-limited interpolation (sinc kernel with a Hann
+            %   window, 16 points to each side), which keeps the fast
+            %   oscillations: linear interpolation would damp them. The
+            %   result fades to zero beyond the window (weights V.w).
+            n  = numel(V.tE);
+            K  = 16;
+            ms = floor(d / V.dt);
+            dl = d / V.dt - ms;                  % 0 <= dl < 1
+            kk = -K:K;
+            if dl == 0
+                h = double(kk == 0);
+            else
+                x = kk - dl;
+                h = sin(pi * x) ./ (pi * x) .* (0.5 + 0.5 * cos(pi * x / (K + 1)));
+                h = h / sum(h);
+            end
+            Y = zeros(size(V.R));
+            for q = 1:numel(kk)
+                if h(q) == 0, continue; end
+                sh = ms + kk(q);                 % Y(:, j) takes R(:, j - sh)
+                j1 = max(1, 1 + sh);  j2 = min(n, n + sh);
+                if j1 <= j2
+                    Y(:, j1:j2) = Y(:, j1:j2) + h(q) * V.R(:, (j1:j2) - sh);
+                end
+            end
+            Y = Y .* V.w;
+            t = t(:).';
+            Yt = zeros(size(Y, 1), numel(t));
+            in = find(t >= V.tE(1) & t <= V.tE(end));
+            if ~isempty(in)
+                x  = (t(in) - V.tE(1)) / V.dt;
+                i0 = min(max(floor(x), 0), n - 2);
+                wq = x - i0;
+                Yt(:, in) = Y(:, i0 + 1) .* (1 - wq) + Y(:, i0 + 2) .* wq;
+            end
+            Y = Yt;
+        end
+        
+        function band = solventBand(~, G, freq, rows, info)
+            %SOLVENTBAND  Frequency band of the strongest mode of the
+            %   solvent: around the largest value of its power spectrum
+            %   (summed over the rows given), as far as the power stays
+            %   above 10 % of that value. Frequencies below 3 cycles per
+            %   time window are not considered.
+            band = [NaN NaN];
+            rows = logical(rows(:)).';
+            if ~any(rows), return; end
+            P  = sum(abs(G(rows, :)).^2, 1);
+            nF = numel(freq);
+            i0 = min(nF, ceil(3 * info.Nfft / info.Nwin) + 1);
+            [pk, ip] = max(P(i0:end));
+            ip = ip + i0 - 1;
+            if isempty(pk) || ~(pk > 0), return; end
+            iL = ip;
+            while iL > i0 && P(iL - 1) > 0.1 * pk, iL = iL - 1; end
+            iR = ip;
+            while iR < nF && P(iR + 1) > 0.1 * pk, iR = iR + 1; end
+            band = [freq(iL), freq(iR)];
+        end
+        
+        function [A, d, q] = fitSolventCoherence(app, R, V, t, options, band, rows, maxShift, fitShift, d0)
+            %FITSOLVENTCOHERENCE  Factor A and time shift d of the solvent
+            %   coherence V that take it out of the residual R best: least
+            %   squares on the real and imaginary parts of the Fourier
+            %   transforms, over the rows given, in the frequency band
+            %   band(1) ... band(2) (unit of options.freqUnit):
+            %       FT[R] ~ A * FT[V(t - d)]
+            %   fitShift false: d = d0. Otherwise d is searched in
+            %   [-maxShift, maxShift]: on a grid with 16 points per period
+            %   of the highest frequency of the band (at least 41 points),
+            %   with FT[V(t - d)] = exp(-2 pi i f d) FT[V], then by a
+            %   golden-section search between the neighbors of the best
+            %   point (60 steps). A follows in closed form, with the
+            %   coherence shifted as it is subtracted.
+            %   q: struct with P0, P1 (power of the residual in the band
+            %   before and after the subtraction), nFreq, nRows.
+            [F, freq, info] = app.cohSpectrum(R, t, options);
+            fm = freq >= min(band) & freq <= max(band);
+            if ~any(fm)
+                error('The band holds no frequency of the FFT. Widen it.');
+            end
+            rows = logical(rows(:)).';
+            if ~any(rows)
+                error('The spectral range of the fit holds no point.');
+            end
+            d = d0;
+            if fitShift && maxShift > 0
+                G0 = app.cohSpectrum(app.solventShifted(V, t, 0), t, options);
+                c  = sum(conj(G0(rows, fm)) .* F(rows, fm), 1);
+                fB = (find(fm) - 1) / (info.Nfft * info.dtUni);   % cycles per time unit
+                nG = 2 * ceil(16 * maxShift * max(fB)) + 1;
+                nG = min(max(nG, 41), 4001);
+                dG = linspace(-maxShift, maxShift, nG);
+                Sg = real(exp(2i * pi * dG(:) * fB) * c(:));
+                [~, ig] = max(Sg);
+                lo = dG(max(ig - 1, 1));  hi = dG(min(ig + 1, nG));
+                sfun = @(x) -real(sum(c .* exp(2i * pi * fB * x)));
+                gr = (sqrt(5) - 1) / 2;
+                x1 = hi - gr * (hi - lo);  x2 = lo + gr * (hi - lo);
+                f1 = sfun(x1);  f2 = sfun(x2);
+                for it = 1:60
+                    if f1 <= f2
+                        hi = x2;  x2 = x1;  f2 = f1;
+                        x1 = hi - gr * (hi - lo);  f1 = sfun(x1);
+                    else
+                        lo = x1;  x1 = x2;  f1 = f2;
+                        x2 = lo + gr * (hi - lo);  f2 = sfun(x2);
+                    end
+                end
+                d = (lo + hi) / 2;
+            end
+            Gd = app.cohSpectrum(app.solventShifted(V, t, d), t, options);
+            a = F(rows, fm);   a = a(:);
+            b = Gd(rows, fm);  b = b(:);
+            den = sum(abs(b).^2);
+            A = 0;
+            if den > 0, A = real(sum(conj(b) .* a)) / den; end
+            q = struct('P0', sum(abs(a).^2), 'P1', sum(abs(a - A * b).^2), ...
+                'nFreq', nnz(fm), 'nRows', nnz(rows));
+        end
+        
+        function openSolventWindow(app, hk)
+            %OPENSOLVENTWINDOW  Take the vibrational coherence of the
+            %   solvent, measured alone, out of the residual of the
+            %   Coherence window:  residual - A * solvent(t - shift).
+            %   hk: what the Coherence window lends: its figure, the
+            %   wavelength looked at, and function handles (options,
+            %   residual, rerun, changed, flim, hasResult).
+            %   Modal: nothing can change underneath it.
+            [okS, whyS] = app.solvAllowed();
+            if ~okS
+                uialert(hk.fig, whyS, 'Solvent coherence');  return;
+            end
+            if app.solvData
+                uialert(hk.fig, sprintf(['In this view the solvent is out ' ...
+                    'of the data already (A = %.4g, time shift %.4g %s). ' ...
+                    'Factor and time shift are set in the view "Data": ' ...
+                    'choose it in the main window ("View"), change them in ' ...
+                    'this dialog there and press Apply.'], app.solvDataA, ...
+                    app.solvDataShift, app.tUnitTxt()), 'Solvent coherence');
+                return;
+            end
+            opts = hk.options();
+            tt = app.delay(:).';
+            wl = app.wavelength(:);
+            inWin = tt >= opts.tMin & tt <= opts.tMax;
+            if nnz(inWin) < 8
+                uialert(hk.fig, 'The time window holds fewer than 8 delays.', ...
+                    'Solvent coherence');
+                return;
+            end
+            dtw = median(diff(tt(inWin)));
+            kcm = 1e12 / 2.99792458e10;          % cm^-1 per THz
+            band0 = app.solvBand(:).';
+            if all(isfinite(band0)) && ~strcmp(app.solvBandUnit, opts.freqUnit)
+                if strcmp(opts.freqUnit, 'thz')
+                    band0 = band0 / kcm;
+                else
+                    band0 = band0 * kcm;
+                end
+            end
+            if ~all(isfinite(band0)), band0 = [0 0]; end
+            wl0 = app.solvWL(:).';
+            if ~all(isfinite(wl0)), wl0 = [min(wl) max(wl)]; end
+            ms0 = app.solvMaxShift;
+            if ~isfinite(ms0) || ms0 < 0, ms0 = 2 * dtw; end
+            if strcmp(opts.freqUnit, 'thz')
+                fuTxt = 'THz';  fLabel = 'Frequency (THz)';
+            else
+                fuTxt = app.uiStr('cm^{-1}');  fLabel = 'Wavenumber (cm^{-1})';
+            end
+            
+            f = uifigure('Name', 'Solvent Coherence', ...
+                'Position', app.fitFigurePosition(980, 702), ...
+                'WindowStyle', 'modal');
+            app.applyLightTheme(f);
+            gl = uigridlayout(f, [7, 1]);
+            gl.RowHeight  = {30, 30, 30, 30, '1x', 'fit', 36};
+            gl.Padding    = [10 10 10 10];
+            gl.RowSpacing = 6;
+            
+            % ---- row 1: the file ----
+            r1 = uigridlayout(gl, [1, 2]);
+            r1.ColumnWidth = {170, '1x'};  r1.Padding = [0 0 0 0];
+            btnLoad = uibutton(r1, 'Text', 'Load solvent data...', ...
+                'Tooltip', ['Data file of the solvent alone, measured at ' ...
+                    'the same wavelengths and delays. It is the reference ' ...
+                    'data set of "Subtract data...".'], ...
+                'ButtonPushedFcn', @(~,~) onLoad());
+            lblFile = uilabel(r1, 'Text', '', 'FontColor', [0.2 0.2 0.2]);
+            
+            % ---- row 2: where the fit looks ----
+            r2 = uigridlayout(gl, [1, 11]);
+            r2.ColumnWidth = {'fit', 80, 'fit', 80, 'fit', 170, 'fit', 80, ...
+                              'fit', 80, '1x'};
+            r2.Padding = [0 0 0 0];  r2.ColumnSpacing = 6;
+            uilabel(r2, 'Text', app.uiStr('Fit in the band  \nu from:'), ...
+                'HorizontalAlignment', 'right');
+            edF1 = uieditfield(r2, 'numeric', 'Value', band0(1), ...
+                'ValueDisplayFormat', '%.6g');
+            uilabel(r2, 'Text', 'to:', 'HorizontalAlignment', 'right');
+            edF2 = uieditfield(r2, 'numeric', 'Value', band0(2), ...
+                'ValueDisplayFormat', '%.6g', ...
+                'Tooltip', ['Frequency band used by the estimate. It should ' ...
+                    'hold a mode of the solvent and no mode of the solute.']);
+            uilabel(r2, 'Text', fuTxt);
+            btnBand = uibutton(r2, 'Text', 'Strongest solvent band', ...
+                'Tooltip', ['Set the band to the strongest mode of the ' ...
+                    'solvent data (where its power is above 10 % of the ' ...
+                    'largest value).'], ...
+                'ButtonPushedFcn', @(~,~) onBand());
+            uilabel(r2, 'Text', sprintf('%s from:', app.xSymTxt()), ...
+                'HorizontalAlignment', 'right');
+            edW1 = uieditfield(r2, 'numeric', 'Value', wl0(1), ...
+                'ValueDisplayFormat', '%.6g');
+            uilabel(r2, 'Text', 'to:', 'HorizontalAlignment', 'right');
+            edW2 = uieditfield(r2, 'numeric', 'Value', wl0(2), ...
+                'ValueDisplayFormat', '%.6g', ...
+                'Tooltip', 'Spectral range used by the estimate.');
+            uilabel(r2, 'Text', '');
+            
+            % ---- row 3: factor and shift ----
+            r3 = uigridlayout(gl, [1, 9]);
+            r3.ColumnWidth = {'fit', 90, 'fit', 90, 'fit', 80, 130, 170, '1x'};
+            r3.Padding = [0 0 0 0];  r3.ColumnSpacing = 6;
+            uilabel(r3, 'Text', 'Factor A:', 'HorizontalAlignment', 'right');
+            edA = uieditfield(r3, 'numeric', 'Value', app.solvA, ...
+                'ValueDisplayFormat', '%.6g', ...
+                'Tooltip', ['Factor of the solvent coherence. Below 1 when ' ...
+                    'the solute absorbs part of the pump.']);
+            uilabel(r3, 'Text', sprintf('Time shift (%s):', app.tUnitTxt()), ...
+                'HorizontalAlignment', 'right');
+            edShift = uieditfield(r3, 'numeric', 'Value', app.solvShift, ...
+                'ValueDisplayFormat', '%.6g', ...
+                'Tooltip', ['Shift of the solvent coherence in time. ' ...
+                    'Positive: it is moved to later delays.']);
+            uilabel(r3, 'Text', 'Largest shift:', 'HorizontalAlignment', 'right');
+            edMax = uieditfield(r3, 'numeric', 'Value', ms0, ...
+                'Limits', [0 Inf], 'ValueDisplayFormat', '%.6g', ...
+                'Tooltip', ['"Estimate factor + shift" looks for the shift ' ...
+                    'between minus and plus this value. Keep it below ' ...
+                    'half a period of the solvent mode.']);
+            btnEstA = uibutton(r3, 'Text', 'Estimate factor', ...
+                'Tooltip', ['Least-squares factor in the band, with the ' ...
+                    'time shift as entered.'], ...
+                'ButtonPushedFcn', @(~,~) onEstimate(false));
+            btnEstB = uibutton(r3, 'Text', 'Estimate factor + shift', ...
+                'Tooltip', 'Least-squares factor and time shift in the band.', ...
+                'ButtonPushedFcn', @(~,~) onEstimate(true));
+            uilabel(r3, 'Text', '');
+            
+            % ---- row 4: where the right plot looks ----
+            r4 = uigridlayout(gl, [1, 3]);
+            r4.ColumnWidth = {'fit', 100, '1x'};
+            r4.Padding = [0 0 0 0];  r4.ColumnSpacing = 6;
+            uilabel(r4, 'Text', sprintf('Traces at %s:', app.xSymTxt()), ...
+                'HorizontalAlignment', 'right');
+            edPW = uieditfield(r4, 'numeric', 'Value', hk.lambda, ...
+                'ValueDisplayFormat', '%.6g');
+            uilabel(r4, 'Text', sprintf(['(time window %.4g ... %.4g %s and ' ...
+                'FFT settings: those of the Coherence window)'], ...
+                opts.tMin, opts.tMax, app.tUnitTxt()), ...
+                'FontAngle', 'italic', 'FontColor', [0.45 0.45 0.45]);
+            
+            % ---- row 5: plots ----
+            pg = uigridlayout(gl, [1, 2]);
+            pg.Padding = [0 0 0 0];  pg.ColumnSpacing = 8;
+            axP = app.boxAxes(pg, [56 14 24 40]);
+            axT = app.boxAxes(pg, [56 14 24 40]);
+            
+            % ---- row 6: message; row 7: this analysis ----
+            lblMsg = uilabel(gl, 'Text', '', 'WordWrap', 'on', ...
+                'FontColor', [0.25 0.25 0.25]);
+            bot = uigridlayout(gl, [1, 5]);
+            bot.ColumnWidth = {'1x', 'fit', 110, 160, 90};
+            bot.Padding = [0 0 0 0];  bot.ColumnSpacing = 6;
+            uilabel(bot, 'Text', '');
+            uilabel(bot, 'Text', 'From the residual of this analysis:', ...
+                'HorizontalAlignment', 'right');
+            btnApply = uibutton(bot, 'Text', 'Apply', ...
+                'BackgroundColor', [0.30 0.65 0.35], 'FontColor', 'w', ...
+                'ButtonPushedFcn', @(~,~) onApply());
+            btnOff = uibutton(bot, 'Text', 'Remove subtraction', ...
+                'ButtonPushedFcn', @(~,~) onRemove());
+            uibutton(bot, 'Text', 'Close', ...
+                'ButtonPushedFcn', @(~,~) delete(f));
+            
+            % ---- state ----
+            R = [];        % residual of the sample (made when first needed)
+            F = [];        % its Fourier transform
+            freq = [];  finfo = struct();
+            V = [];        % solvent coherence
+            Vpad = NaN;    % shift it was made for
+            Rmsg = '';     % why the data are not available
+            
+            ctl = {edA, edShift, edMax, edF1, edF2, edW1, edW2, edPW};
+            for q = 1:numel(ctl)
+                ctl{q}.ValueChangedFcn = @(~,~) onEdit();
+            end
+            refresh('');
+            
+            function ok = needData()
+                % Residual of the sample, its Fourier transform and the
+                % solvent coherence: made when first needed.
+                ok = false;
+                if isempty(app.refStage) || ...
+                        ~isequal(size(app.refStage), size(app.deltaA))
+                    return;
+                end
+                if isempty(R)
+                    lblMsg.Text = 'Computing the residual...';  drawnow;
+                    try
+                        Rn = hk.residual();
+                        [F, freq, finfo] = app.cohSpectrum(Rn, tt, opts);
+                        R = Rn;
+                    catch ME
+                        R = [];  Rmsg = ME.message;
+                        return;
+                    end
+                end
+                pad = max(abs(edMax.Value), abs(edShift.Value));
+                if isempty(V) || ~isequal(pad, Vpad)
+                    try
+                        V = app.solventVC(app.solventData(), tt, opts, pad);
+                        Vpad = pad;
+                    catch ME
+                        V = [];  Rmsg = ME.message;
+                        return;
+                    end
+                end
+                ok = true;
+            end
+            
+            function rows = fitRows()
+                rows = wl >= min(edW1.Value, edW2.Value) & ...
+                       wl <= max(edW1.Value, edW2.Value);
+            end
+            
+            function setBand()
+                % band of the strongest solvent mode into the two fields
+                try
+                    G0 = app.cohSpectrum(app.solventShifted(V, tt, 0), tt, opts);
+                    bnd = app.solventBand(G0, freq, fitRows(), finfo);
+                catch
+                    bnd = [NaN NaN];
+                end
+                if all(isfinite(bnd)) && bnd(2) > bnd(1)
+                    edF1.Value = bnd(1);  edF2.Value = bnd(2);
+                end
+            end
+            
+            function refresh(msg)
+                if isempty(app.refOrig)
+                    lblFile.Text = 'No solvent data loaded.';
+                else
+                    lblFile.Text = sprintf('%s   (%d x %d)', app.refDesc, ...
+                        size(app.refOrig, 1), size(app.refOrig, 2));
+                end
+                Rmsg = '';
+                ok = needData();
+                if ok && ~(edF2.Value > edF1.Value)
+                    setBand();         % no band yet: the strongest one
+                end
+                en = app.pick(ok, 'on', 'off');
+                btnBand.Enable = en;  btnEstA.Enable = en;
+                btnEstB.Enable = en;  btnApply.Enable = en;
+                btnOff.Enable  = app.pick(app.solvOn, 'on', 'off');
+                btnLoad.Enable = app.pick(~app.subApplied, 'on', 'off');
+                if ~isempty(Rmsg)
+                    msg = Rmsg;
+                elseif isempty(msg)
+                    if app.solvOn
+                        msg = sprintf(['Subtracted now: residual - %.5g x ' ...
+                            'solvent coherence, time shift %.5g %s.'], ...
+                            app.solvA, app.solvShift, app.tUnitTxt());
+                        if app.solvViewsOK()
+                            msg = [msg '  In the main window, "View" ' ...
+                                'shows the data without the solvent: ' ...
+                                '"Solvent coherence subtracted" (the ' ...
+                                'oscillating part, in this time window) ' ...
+                                'or "Solvent signal subtracted" (the ' ...
+                                'whole solvent signal, at all delays).'];
+                        end
+                    elseif ok
+                        msg = ['Nothing is subtracted yet. Choose a band ' ...
+                            'that holds a mode of the solvent and none of ' ...
+                            'the solute, estimate the factor (and the time ' ...
+                            'shift), then press Apply. The main window ' ...
+                            'can then show the data without the solvent ' ...
+                            '("View").'];
+                    elseif ~isempty(app.refOrig)
+                        msg = ['The solvent data could not be brought to ' ...
+                            'the state of the data shown.'];
+                    else
+                        msg = ['Load the file of the solvent alone, as ' ...
+                            'measured. The corrections of the data ' ...
+                            '(background, chirp, masks, crop) are applied ' ...
+                            'to it.'];
+                    end
+                end
+                if app.subApplied && isempty(Rmsg)
+                    msg = [msg sprintf(['  This file is subtracted in the ' ...
+                        'main window (scale %.4g): the factor here is ' ...
+                        'what remains. To use another file, remove that ' ...
+                        'subtraction first.'], app.subScale)];
+                end
+                lblMsg.Text = msg;
+                drawPreview();
+            end
+            
+            function onEdit()
+                needData();
+                drawPreview();
+            end
+            
+            function drawPreview()
+                app.claAll(axP);  app.claAll(axT);
+                xlabel(axP, fLabel);  ylabel(axP, 'Power');
+                xlabel(axT, sprintf('Delay time (%s)', app.tUnitAx()));
+                ylabel(axT, 'Residual');
+                grid(axP, 'on');  grid(axT, 'on');
+                if isempty(R) || isempty(V), return; end
+                Av = edA.Value;  dv = edShift.Value;
+                if ~isfinite(Av) || ~isfinite(dv), return; end
+                try
+                    Yd = app.solventShifted(V, tt, dv);
+                    Gd = app.cohSpectrum(Yd, tt, opts);
+                catch
+                    return;
+                end
+                rows = fitRows();
+                if ~any(rows), rows = true(size(wl)); end
+                P0 = sum(abs(F(rows, :)).^2, 1);
+                Ps = Av^2 * sum(abs(Gd(rows, :)).^2, 1);
+                P1 = sum(abs(F(rows, :) - Av * Gd(rows, :)).^2, 1);
+                hold(axP, 'on');
+                hp = plot(axP, freq, P0, '-', 'Color', [0.10 0.35 0.75], ...
+                    'LineWidth', 1.2, 'DisplayName', 'Residual');
+                hp(2) = plot(axP, freq, Ps, '-', 'Color', [0.55 0.55 0.55], ...
+                    'LineWidth', 1.0, 'DisplayName', 'A x solvent');
+                hp(3) = plot(axP, freq, P1, '-', 'Color', [0.85 0.20 0.15], ...
+                    'LineWidth', 1.2, 'DisplayName', 'After subtraction');
+                if edF2.Value > edF1.Value
+                    xline(axP, edF1.Value, 'k:', 'HandleVisibility', 'off');
+                    xline(axP, edF2.Value, 'k:', 'HandleVisibility', 'off');
+                end
+                hold(axP, 'off');
+                xl = hk.flim(freq);
+                if numel(xl) == 2 && xl(2) > xl(1), xlim(axP, xl); end
+                title(axP, 'Power in the spectral range of the fit');
+                legend(axP, hp, 'Location', 'best');
+                [~, iw] = min(abs(wl - edPW.Value));
+                hold(axT, 'on');
+                ht = plot(axT, tt(inWin), R(iw, inWin), '-', ...
+                    'Color', [0.10 0.35 0.75], 'LineWidth', 1.2, ...
+                    'DisplayName', 'Residual');
+                ht(2) = plot(axT, tt(inWin), Av * Yd(iw, inWin), '-', ...
+                    'Color', [0.55 0.55 0.55], 'LineWidth', 1.0, ...
+                    'DisplayName', 'A x solvent coherence');
+                ht(3) = plot(axT, tt(inWin), R(iw, inWin) - Av * Yd(iw, inWin), '-', ...
+                    'Color', [0.85 0.20 0.15], 'LineWidth', 1.2, ...
+                    'DisplayName', 'After subtraction');
+                yline(axT, 0, 'k:', 'HandleVisibility', 'off');
+                hold(axT, 'off');
+                title(axT, sprintf('Traces at %.6g %s', wl(iw), app.xUnitAx()));
+                legend(axT, ht, 'Location', 'best');
+            end
+            
+            function onLoad()
+                [fn, fp] = uigetfile( ...
+                    {'*.csv;*.dat;*.txt', 'Data (*.csv, *.dat, *.txt)'; ...
+                     '*.*', 'All Files'}, ...
+                    'Select the data file of the solvent', app.startDir());
+                figure(f);
+                if isequal(fn, 0), return; end
+                app.rememberDir(fp);
+                try
+                    [w2, t2, A2] = app.parseDataFile(fullfile(fp, fn));
+                catch ME
+                    refresh(sprintf('Failed to read the file: %s', ME.message));
+                    return;
+                end
+                wasOn = app.solvOn;
+                [ok, msg] = app.setReference(w2, t2, A2, fn);
+                if ~ok, refresh(msg);  return; end
+                V = [];
+                edF1.Value = 0;  edF2.Value = 0;     % the band of the new file
+                em = '';
+                if wasOn && hk.hasResult()
+                    % another file: nothing is subtracted until Apply
+                    em = hk.rerun();
+                else
+                    hk.changed();
+                end
+                if ~isempty(em)
+                    refresh(sprintf('The analysis failed: %s', em));  return;
+                end
+                refresh('');
+            end
+            
+            function onBand()
+                if ~needData(), refresh('');  return; end
+                setBand();
+                refresh(sprintf(['Band of the strongest solvent mode: ' ...
+                    '%.5g ... %.5g %s.'], edF1.Value, edF2.Value, fuTxt));
+            end
+            
+            function onEstimate(withShift)
+                if ~needData(), refresh('');  return; end
+                if ~(edF2.Value > edF1.Value)
+                    refresh('Give the band of the fit ("from" below "to").');
+                    return;
+                end
+                rows = fitRows();
+                if ~any(rows)
+                    refresh('The spectral range of the fit holds no point.');
+                    return;
+                end
+                try
+                    [Af, df, qf] = app.fitSolventCoherence(R, V, tt, opts, ...
+                        [edF1.Value edF2.Value], rows, edMax.Value, ...
+                        withShift, edShift.Value);
+                catch ME
+                    refresh(sprintf('Estimate failed: %s', ME.message));
+                    return;
+                end
+                edA.Value = Af;  edShift.Value = df;
+                msg = sprintf(['Estimate: A = %.5g, time shift %.5g %s. ' ...
+                    'Power in the band: %.4g before, %.4g after ' ...
+                    '(%.1f %% left). Not applied yet.'], Af, df, ...
+                    app.tUnitTxt(), qf.P0, qf.P1, ...
+                    100 * qf.P1 / max(qf.P0, realmin));
+                if Af <= 0
+                    msg = [msg '  The factor is not positive: the band ' ...
+                        'holds nothing that matches the solvent.'];
+                elseif withShift && edMax.Value > 0 && ...
+                        abs(abs(df) - edMax.Value) < 1e-6 * edMax.Value
+                    msg = [msg '  The shift is at the limit "Largest ' ...
+                        'shift": check it.'];
+                end
+                refresh(msg);
+            end
+            
+            function onApply()
+                if ~needData(), refresh('');  return; end
+                if ~isfinite(edA.Value) || ~isfinite(edShift.Value)
+                    refresh('Factor and time shift must be numbers.');
+                    return;
+                end
+                app.solvOn       = true;
+                app.solvA        = edA.Value;
+                app.solvShift    = edShift.Value;
+                app.solvBand     = [edF1.Value edF2.Value];
+                app.solvBandUnit = opts.freqUnit;
+                app.solvWL       = [edW1.Value edW2.Value];
+                app.solvMaxShift = edMax.Value;
+                lblMsg.Text = 'Running the coherence analysis...';  drawnow;
+                em = hk.rerun();
+                if ~isempty(em)
+                    refresh(sprintf('The analysis failed: %s', em));  return;
+                end
+                refresh('');
+            end
+            
+            function onRemove()
+                app.solvOn = false;
+                app.clearSolvDef();
+                em = '';
+                if hk.hasResult()
+                    em = hk.rerun();
+                else
+                    hk.changed();
+                end
+                if ~isempty(em)
+                    refresh(sprintf('The analysis failed: %s', em));  return;
+                end
+                refresh('The subtraction was removed.');
+            end
+            
+        end
+
+        % =================================================================
+        % Anisotropy: parallel (the loaded data) and perpendicular data
+        % =================================================================
+        function clearAnisotropy(app)
+            % No perpendicular data (new data, session about to be read).
+            app.aniOn = false;
+            app.perpOrig = [];  app.perpDesc = '';  app.perpStage = [];
+            app.aniPar = [];  app.aniPerp = [];  app.aniPerp0 = [];
+            app.aniGUsed = 1;
+            app.aniView = 'r';  app.aniG = 1;
+            app.aniTail = false;  app.aniTailT = [NaN NaN];  app.aniThr = 3;
+            app.aniShift = 0;
+            app.aniStore = struct();
+        end
+        
+        function updatePerpStage(app)
+            % The perpendicular data at the stage of deltaA_raw (empty
+            % when they cannot be brought there).
+            app.perpStage = [];
+            if isempty(app.perpOrig), return; end
+            [X, ok] = app.replayCorrections(app.perpOrig);
+            if ok && isequal(size(X), size(app.deltaA_raw))
+                app.perpStage = X;
+            end
+        end
+        
+        function [ok, msg] = setPerpendicular(app, wl, t, A, desc)
+            %SETPERPENDICULAR  Take a parsed file as the perpendicular
+            %   data. Its axes must be those of the loaded (parallel)
+            %   data, as parsed or with the two axes interchanged.
+            ok = false;  msg = '';
+            wl0 = app.originalWavelength(:);  t0 = app.originalDelay(:).';
+            wl = wl(:);  t = t(:).';
+            if ~app.sameAxis(wl, wl0) || ~app.sameAxis(t, t0)
+                wlT = t(:);  tT = wl(:).';  AT = A.';
+                [wlT, iw] = sort(wlT);  AT = AT(iw, :);
+                [tT,  it] = sort(tT);   AT = AT(:,  it);
+                if app.sameAxis(wlT, wl0) && app.sameAxis(tT, t0)
+                    A = AT;
+                else
+                    msg = sprintf(['The axes of this file differ from those ' ...
+                        'of the loaded data (%d x %d points here, %d x %d ' ...
+                        'in the data). The two polarizations must be ' ...
+                        'measured at the same wavelengths and delays.'], ...
+                        numel(wl), numel(t), numel(wl0), numel(t0));
+                    return;
+                end
+            end
+            if ~app.corrLogOK
+                msg = ['This session was saved by an earlier version, ' ...
+                    'after a crop: the steps made since loading are not ' ...
+                    'recorded. Press "Reset all" in the main window, then ' ...
+                    'load the perpendicular data.'];
+                return;
+            end
+            if app.solvData
+                msg = ['A view without the solvent is shown ("View" of ' ...
+                    'the main window). Choose the view "Data" first, then ' ...
+                    'load the perpendicular data.'];
+                return;
+            end
+            app.perpOrig = A;
+            app.perpDesc = desc;
+            app.updatePerpStage();
+            ok = ~isempty(app.perpStage);
+            if ok, app.solvOn = false;  app.clearSolvDef(); end
+            if ok && ~app.aniOn
+                % the first perpendicular data: what the analysis
+                % windows hold belongs to the parallel data, and is
+                % kept as that of the view "Parallel"
+                app.closeAnalysisWindows();
+                app.aniStore = struct();
+                if ~strcmp(app.aniView, 'par')
+                    app.aniStore.par = app.takeAnalysisState();
+                end
+            elseif ok
+                % other perpendicular data: every view but the parallel
+                % one changes
+                app.dropViewResults({'perp', 'magic', 'r'});
+            end
+            if ~ok
+                app.perpOrig = [];  app.perpDesc = '';
+                msg = 'The perpendicular data could not be brought to the state of the data shown.';
+            end
+        end
+        
+        function [V, G, nBlank] = aniCombine(app, P, S, t, view, Gin, tailOn, tailT, thr)
+            %ANICOMBINE  One anisotropy view from the corrected parallel
+            %   (P) and perpendicular (S) data.
+            %   G, the factor of the perpendicular data: Gin, or with
+            %   tailOn the least-squares factor between the two data
+            %   sets, P ~ G * S, over all wavelengths in the delays
+            %   tailT(1) ... tailT(2) (tail matching: there the anisotropy
+            %   is taken to have decayed). Not the ratio of the sums: a
+            %   transient spectrum has both signs and its sum can be
+            %   close to zero. And least squares in both data sets
+            %   (orthogonal regression through the origin, equal noise in
+            %   P and S): with the noise in S left out, G comes out too
+            %   small where the tail is weak.
+            %   view 'par':   P
+            %        'perp':  G * S
+            %        'magic': (P + 2 G S) / 3
+            %        'r':     (P - G S) ./ (P + 2 G S), left empty (NaN)
+            %                 where |P + 2 G S| < thr x noise of that sum
+            %                 at the wavelength (nBlank values).
+            G = Gin;  nBlank = 0;
+            if tailOn && all(isfinite(tailT))
+                m = t(:).' >= min(tailT) & t(:).' <= max(tailT);
+                a = P(:, m);  b = S(:, m);
+                ok = isfinite(a) & isfinite(b);
+                saa = sum(a(ok) .^ 2);
+                sbb = sum(b(ok) .^ 2);
+                sab = sum(a(ok) .* b(ok));
+                if any(ok(:)) && sbb > 0
+                    if sab > 0
+                        G = (saa - sbb + sqrt((saa - sbb) ^ 2 + 4 * sab ^ 2)) / (2 * sab);
+                    else
+                        G = sab / sbb;         % no common signal in the range
+                    end
+                end
+            end
+            switch view
+                case 'perp'
+                    V = G * S;
+                case 'magic'
+                    V = (P + 2 * G * S) / 3;
+                case 'r'
+                    den = P + 2 * G * S;
+                    V = (P - G * S) ./ den;
+                    sg = app.autoNoise(den, t);
+                    low = abs(den) < thr * sg;     % (no noise value: kept)
+                    nBlank = nnz(low);
+                    V(low) = NaN;
+                    V(~isfinite(V)) = NaN;
+                otherwise
+                    V = P;
+            end
+        end
+        
+        function T = aniTailSpectrum(~, P, S, t, tailT, Gu)
+            %ANITAILSPECTRUM  G of the tail matching, wavelength by wavelength.
+            %   For every wavelength the factor between the parallel (P)
+            %   and the perpendicular (S) data in the delays tailT(1) ...
+            %   tailT(2), found as in aniCombine (orthogonal regression
+            %   through the origin), and its uncertainty from the scatter
+            %   of the n points of this range about that line:
+            %   sG = sqrt(sum((P - G S).^2) / (n - 1)) / sqrt(sum(S.^2)).
+            %   The noise is taken from the tail itself, not from the
+            %   whole trace: a chirp correction interpolates along the
+            %   delays and lowers the point-to-point noise of the early,
+            %   closely spaced delays (a little also with the spline of
+            %   interpRuns), while it hardly touches the tail.
+            %   A check of the one G that is in use (Gu), not used in any
+            %   calculation: G is the same along the spectrum when these
+            %   values scatter as their noise lets expect.
+            %   T.G, T.sG  column vectors; NaN where a wavelength has fewer
+            %              than 5 delays in the range or no common signal
+            %              there
+            %   T.ok       the wavelengths whose G is determined to 10 %
+            %              (sG <= 0.1 |G|); only those are compared with Gu
+            %   T.nOk      their number;  T.nAll: wavelengths with a value
+            %   T.lo, T.hi smallest and largest G among them (NaN: none)
+            %   T.ratio    RMS of (G - Gu) ./ sG among them: about 1 when
+            %              the scatter is what the noise explains, larger
+            %              when G depends on the wavelength or the
+            %              anisotropy has not decayed everywhere. (With
+            %              sG from n points, (G - Gu) / sG follows
+            %              Student's t with n - 1 degrees of freedom,
+            %              whose mean square is (n - 1) / (n - 3): every
+            %              term is divided by that.) NaN with fewer than
+            %              3 such wavelengths, or without noise in the
+            %              data.
+            M = size(P, 1);
+            T = struct('G', NaN(M, 1), 'sG', NaN(M, 1), 'ok', false(M, 1), ...
+                'nOk', 0, 'nAll', 0, 'lo', NaN, 'hi', NaN, 'ratio', NaN);
+            if numel(tailT) ~= 2 || ~all(isfinite(tailT)), return; end
+            t = t(:).';
+            m = t >= min(tailT) & t <= max(tailT);
+            if nnz(m) < 5, return; end
+            nPt = zeros(M, 1);
+            for i = 1:M
+                a = P(i, m);  b = S(i, m);
+                k = isfinite(a) & isfinite(b);
+                n = nnz(k);
+                if n < 5, continue; end
+                saa = sum(a(k) .^ 2);
+                sbb = sum(b(k) .^ 2);
+                sab = sum(a(k) .* b(k));
+                if ~(sab > 0), continue; end
+                g = (saa - sbb + sqrt((saa - sbb) ^ 2 + 4 * sab ^ 2)) / (2 * sab);
+                T.G(i)  = g;
+                T.sG(i) = sqrt(sum((a(k) - g * b(k)) .^ 2) / (n - 1)) / sqrt(sbb);
+                nPt(i)  = n;
+            end
+            T.nAll = nnz(isfinite(T.G));
+            T.ok   = isfinite(T.G) & isfinite(T.sG) & T.sG <= 0.1 * abs(T.G);
+            T.nOk  = nnz(T.ok);
+            if T.nOk > 0
+                T.lo = min(T.G(T.ok));
+                T.hi = max(T.G(T.ok));
+            end
+            use = T.ok & T.sG > 1e-9 * abs(T.G);     % (data without noise: nothing to compare with)
+            if nnz(use) >= 3 && isfinite(Gu)
+                z2 = ((T.G(use) - Gu) ./ T.sG(use)) .^ 2;
+                T.ratio = sqrt(mean(z2 .* (nPt(use) - 3) ./ (nPt(use) - 1)));
+            end
+        end
+        
+        function autoZRange(app)
+            % Color range of the map back to automatic (the two fields
+            % show the range the map uses).
+            app.mapZMin = [];  app.mapZMax = [];
+            if ~isempty(app.edZMin) && isvalid(app.edZMin) && ~isempty(app.deltaA)
+                [cMin, cMax] = app.computeZLim();
+                app.edZMin.Value = cMin;
+                app.edZMax.Value = cMax;
+            end
+        end
+        
+        function setAniView(app, v)
+            %SETANIVIEW  Choose what the working data are: 'par' | 'perp'
+            %   | 'magic' | 'r'. Another view is other data, so the
+            %   analysis windows close. Their setup and results are kept
+            %   for the view that is left (aniStore) and come back with
+            %   it. A view without kept results starts with the setup of
+            %   the view before, and without results.
+            if ~app.aniOn || ~any(strcmp(v, {'par', 'perp', 'magic', 'r'}))
+                app.updateSignalLabel();  return;
+            end
+            old = app.aniView;
+            if strcmp(v, old)
+                app.recompute();
+            else
+                app.closeAnalysisWindows();
+                app.aniStore.(old) = app.takeAnalysisState();
+                app.aniView = v;
+                hold0 = app.holdDataChange;
+                app.holdDataChange = true;    % (the results are dealt with here)
+                try
+                    app.recompute();
+                catch ME
+                    app.holdDataChange = hold0;
+                    rethrow(ME);
+                end
+                app.holdDataChange = hold0;
+                if isfield(app.aniStore, v)
+                    app.putAnalysisState(app.aniStore.(v));
+                    app.aniStore = rmfield(app.aniStore, v);
+                else
+                    app.clearLiveResults();
+                end
+            end
+            app.autoZRange();
+            app.updateStatusLabel();
+            app.updateAll();
+        end
+        
+        function tl = aniTailProposal(app)
+            %ANITAILPROPOSAL  Delay range proposed for the tail matching:
+            %   the last decade of the delays, from the first delay that
+            %   is at least one tenth of the last one. Only a proposal:
+            %   the range has to lie where the anisotropy has decayed.
+            %   Without a positive last delay, or with fewer than three
+            %   delays there: the last fifth of the delay points.
+            t  = app.delay(:).';
+            tl = [t(max(1, round(0.8 * numel(t)))), t(end)];
+            if t(end) > 0
+                j = find(t >= t(end) / 10);
+                if numel(j) >= 3, tl = [t(j(1)), t(end)]; end
+            end
+        end
+        
+        function P = aniPerpAt(app, d)
+            %ANIPERPAT  The corrected perpendicular data shifted by d along
+            %   the delays: perp(t - d). (d = the shift in use: the data
+            %   in use.)
+            if isempty(app.aniPerp0)
+                P = [];
+            elseif d == app.aniShift && ~isempty(app.aniPerp)
+                P = app.aniPerp;
+            else
+                P = app.shiftRows(app.aniPerp0, app.delay, d);
+            end
+        end
+        
+        function tr = aniShiftProposal(app)
+            %ANISHIFTPROPOSAL  Delay range proposed for the estimate of the
+            %   time shift: 25 delays on either side of the delay closest
+            %   to 0, where the signal rises. Without a delay 0 in the
+            %   data: the first quarter of the delays.
+            t = app.delay(:).';
+            n = numel(t);
+            if n == 0, tr = [NaN NaN];  return; end
+            if t(1) <= 0 && t(end) >= 0
+                [~, j] = min(abs(t));
+                tr = [t(max(1, j - 25)), t(min(n, j + 25))];
+            else
+                tr = [t(1), t(min(n, max(2, floor(n / 4 + 0.5))))];
+            end
+        end
+        
+        function c = aniShiftCost(app, P, S, t, tMask, d, step)
+            %ANISHIFTCOST  How well the perpendicular data shifted by d,
+            %   S(t - d), follow the parallel data P in the delays tMask.
+            %   For every wavelength (row) the sum of the squared
+            %   residuals of P = a S(t - d) + b, with the factor a and
+            %   the offset b of that wavelength chosen by least squares:
+            %   the two signals differ by a factor that depends on the
+            %   wavelength (1 + 2 r against 1 - r), and each may sit on
+            %   its own background. One value per wavelength.
+            %
+            %   Interpolated values carry less noise than measured ones,
+            %   the less the farther they lie from a measured delay; a
+            %   comparison of P with an interpolated S would therefore
+            %   prefer shifts of half a delay step, whatever the signals
+            %   do. So both data sets are interpolated: the comparison is
+            %   made four times, with both moved together by -3/8, -1/8,
+            %   1/8 and 3/8 of the delay step, and the four results are
+            %   averaged. The noise then weighs the same for every d.
+            %
+            %   P, S: complete rows (no empty value) on the delays t.
+            c = zeros(size(P, 1), 1);
+            for k = 0:3
+                dl = (k - 1.5) / 4 * step;
+                A = app.shiftRows(P, t, dl);
+                B = app.shiftRows(S, t, dl + d);
+                A = A(:, tMask);  B = B(:, tMask);
+                A = A - mean(A, 2);
+                B = B - mean(B, 2);
+                sxx = sum(B .* B, 2);
+                sxy = sum(A .* B, 2);
+                syy = sum(A .* A, 2);
+                ck = syy;
+                ok = sxx > 0;
+                ck(ok) = syy(ok) - sxy(ok) .^ 2 ./ sxx(ok);
+                c = c + max(ck, 0);
+            end
+            c = c / 4;
+        end
+        
+        function E = aniShiftEstimate(app, P, S, t, tRange)
+            %ANISHIFTESTIMATE  Time shift d of the perpendicular data S that
+            %   makes S(t - d) follow the parallel data P best in the
+            %   delays tRange (see aniShiftCost; the sum over the
+            %   wavelengths is made smallest). d is searched within a
+            %   quarter of the width of the range on either side of 0: 41
+            %   equally spaced values, then a golden-section search
+            %   between the neighbors of the best one (60 steps), as the
+            %   time shift of "Subtract data".
+            %
+            %   Only wavelengths count whose data are complete (no empty
+            %   value) in the range, widened by the largest shift, one
+            %   delay step and four more delays on both sides: every
+            %   shift is then judged on the same points.
+            %
+            %   The estimate rests on one assumption: within the range
+            %   the two signals have the same shape at every wavelength.
+            %   An anisotropy that changes while the signal rises breaks
+            %   it.
+            %
+            %   E.ok        false when nothing could be estimated (E.msg)
+            %   E.d         the shift
+            %   E.sd        its standard deviation, from the scatter
+            %               between the wavelengths: every wavelength
+            %               pulls d its own way, and the spread of these
+            %               pulls, with the curvature of the sum of
+            %               squares, gives the standard deviation (NaN
+            %               when it cannot be given)
+            %   E.c0, E.c1  sum of squares without a shift and at d
+            %   E.nWl       wavelengths that counted
+            %   E.nT        delays in the range
+            %   E.step      delay step in the range (the median)
+            %   E.maxShift  the limit of the search
+            %   E.atLimit   true when d lies at that limit
+            t = t(:).';
+            n = numel(t);
+            E = struct('ok', false, 'msg', '', 'd', 0, 'sd', NaN, ...
+                'c0', NaN, 'c1', NaN, 'nWl', 0, 'nT', 0, 'step', NaN, ...
+                'maxShift', 0, 'atLimit', false);
+            tr = tRange(:).';
+            if numel(tr) < 2 || ~all(isfinite(tr(1:2))) || tr(1) == tr(2)
+                E.msg = 'Give the delay range of the estimate.';
+                return;
+            end
+            t1 = min(tr(1:2));  t2 = max(tr(1:2));
+            tMask = t >= t1 & t <= t2;
+            E.nT = nnz(tMask);
+            if E.nT < 5
+                E.msg = ['The range holds fewer than 5 delays: the time ' ...
+                    'shift cannot be estimated there.'];
+                return;
+            end
+            step = median(diff(t(tMask)));
+            maxShift = 0.25 * (t2 - t1);
+            E.step = step;  E.maxShift = maxShift;
+            j  = find(t >= t1 - maxShift - step & t <= t2 + maxShift + step);
+            j1 = max(j(1) - 4, 1);
+            j2 = min(j(end) + 4, n);
+            Pj = P(:, j1:j2);  Sj = S(:, j1:j2);
+            % (a wavelength set to zero by a mask holds nothing)
+            rows = all(isfinite(Pj), 2) & all(isfinite(Sj), 2) & ...
+                any(Sj ~= 0, 2);
+            E.nWl = nnz(rows);
+            if E.nWl < 1
+                E.msg = ['No wavelength has complete data around this ' ...
+                    'range: the time shift cannot be estimated there.'];
+                return;
+            end
+            Pj = Pj(rows, :);  Sj = Sj(rows, :);
+            tj = t(j1:j2);  mj = tMask(j1:j2);
+            cost = @(x) sum(app.aniShiftCost(Pj, Sj, tj, mj, x, step));
+            g  = linspace(-maxShift, maxShift, 41);
+            cg = zeros(size(g));
+            for k = 1:numel(g)
+                cg(k) = cost(g(k));
+            end
+            [~, i] = min(cg);
+            lo = g(max(i - 1, 1));  hi = g(min(i + 1, numel(g)));
+            gr = (sqrt(5) - 1) / 2;
+            x1 = hi - gr * (hi - lo);  x2 = lo + gr * (hi - lo);
+            f1 = cost(x1);
+            f2 = cost(x2);
+            for k = 1:60
+                if f1 <= f2
+                    hi = x2;  x2 = x1;  f2 = f1;
+                    x1 = hi - gr * (hi - lo);
+                    f1 = cost(x1);
+                else
+                    lo = x1;  x1 = x2;  f1 = f2;
+                    x2 = lo + gr * (hi - lo);
+                    f2 = cost(x2);
+                end
+            end
+            d = (lo + hi) / 2;
+            E.d  = d;
+            E.c0 = cost(0);
+            E.atLimit = abs(d) >= 0.975 * maxShift;
+            h  = maxShift / 20;
+            cm = app.aniShiftCost(Pj, Sj, tj, mj, d - h, step);
+            cc = app.aniShiftCost(Pj, Sj, tj, mj, d, step);
+            cp = app.aniShiftCost(Pj, Sj, tj, mj, d + h, step);
+            E.c1 = sum(cc);
+            curv = sum(cp - 2 * cc + cm) / h ^ 2;
+            if curv > 0 && E.nWl >= 3 && ~E.atLimit
+                gl = (cp - cm) / (2 * h);
+                E.sd = sqrt(sum((gl - mean(gl)) .^ 2) * ...
+                    E.nWl / (E.nWl - 1)) / curv;
+            end
+            E.ok = true;
+        end
+        
+        function [msg, d] = aniShiftText(app, E)
+            %ANISHIFTTEXT  What an estimate of the time shift
+            %   (aniShiftEstimate) says, and the value for the field of
+            %   the Anisotropy window (NaN: the field is left as it is).
+            u = app.tUnitTxt();
+            d = NaN;
+            if ~E.ok, msg = E.msg;  return; end
+            if E.atLimit
+                msg = sprintf(['The best time shift lies at the limit of ' ...
+                    'the search (%.4g %s, a quarter of the range): the ' ...
+                    'two data sets do not come to match within it. ' ...
+                    'Widen the range, or check the two files. The field ' ...
+                    'was left as it is.'], E.maxShift, u);
+                return;
+            end
+            % the value with the digits its standard deviation leaves
+            % (two of the standard deviation); four digits without one
+            if isfinite(E.sd) && E.sd > 0
+                nd = min(max(1 - floor(log10(E.sd)), 0), 12);
+                d = round(E.d * 10 ^ nd) / 10 ^ nd;
+                if d == 0, d = 0; end           % (not -0)
+                dTxt = sprintf(['%s %s +/- %.2g (from the scatter ' ...
+                    'between the wavelengths)'], ...
+                    sprintf(sprintf('%%.%df', nd), d), u, E.sd);
+            else
+                d = str2double(sprintf('%.4g', E.d));
+                dTxt = sprintf('%.4g %s', d, u);
+            end
+            pct = 0;
+            if E.c0 > 0, pct = 100 * (1 - E.c1 / E.c0); end
+            tail = sprintf(['%d wavelength%s, %d delays; delay step ' ...
+                'there %.4g %s'], E.nWl, app.pick(E.nWl == 1, '', 's'), ...
+                E.nT, E.step, u);
+            if pct < 1
+                % nothing to correct
+                d = 0;
+                msg = sprintf(['No time shift is needed: the best value, ' ...
+                    '%s, lowers the sum of squares between the two data ' ...
+                    'sets in the range by less than 1 %% (%s). The field ' ...
+                    'was set to 0.'], dTxt, tail);
+                return;
+            end
+            msg = sprintf(['Estimated time shift: %s. It lowers the sum ' ...
+                'of squares between the two data sets in the range by ' ...
+                '%.0f %% (%s). The value is in the field: "Apply" uses ' ...
+                'it.'], dTxt, pct, tail);
+        end
+        
+        function applyAnisotropy(app, G, tailOn, tailT, thr, shift)
+            %APPLYANISOTROPY  Set the factor of the perpendicular data
+            %   (typed, or tail matching in the delays tailT), the
+            %   threshold below which r is left empty and the time shift
+            %   of the perpendicular data (left out: as it is); rebuild
+            %   the data.
+            %   What is kept for the views that are not shown (aniStore)
+            %   stays where the data of the view stay: a new G or a new
+            %   time shift leaves the parallel view alone, a new
+            %   threshold alone every view but r. The view shown is dealt
+            %   with by recompute.
+            gOld = app.aniGUsed;  thrOld = app.aniThr;  shOld = app.aniShift;
+            app.aniG = G;
+            app.aniTail = logical(tailOn);
+            app.aniTailT = tailT(:).';
+            app.aniThr = thr;
+            if nargin >= 6 && isscalar(shift) && isfinite(shift)
+                app.aniShift = shift;
+            end
+            if ~app.aniOn, return; end
+            app.aniKeepStore = true;
+            try
+                app.recompute();
+            catch ME
+                app.aniKeepStore = false;
+                rethrow(ME);
+            end
+            app.aniKeepStore = false;
+            if ~isequaln(app.aniGUsed, gOld) || app.aniShift ~= shOld
+                app.dropViewResults({'perp', 'magic', 'r'});
+            elseif ~isequaln(app.aniThr, thrOld)
+                app.dropViewResults({'r'});
+            end
+            app.autoZRange();
+            app.updateStatusLabel();
+            app.updateAll();
+        end
+        
+        function removeAnisotropy(app)
+            % Back to one data set: the parallel data. What was kept for
+            % the view "Parallel" is theirs.
+            if ~app.aniOn && isempty(app.perpOrig), return; end
+            keep = [];
+            if app.aniOn && ~strcmp(app.aniView, 'par') && ...
+                    isfield(app.aniStore, 'par')
+                keep = app.aniStore.par;
+            end
+            app.clearAnisotropy();
+            app.aniKeepStore = true;
+            try
+                app.recompute();
+            catch ME
+                app.aniKeepStore = false;
+                rethrow(ME);
+            end
+            app.aniKeepStore = false;
+            if ~isempty(keep)
+                app.putAnalysisState(keep);
+            end
+            app.autoZRange();
+            app.updateStatusLabel();
+            app.updateAll();
+        end
+        
+        function openAnisotropyWindow(app)
+            %OPENANISOTROPYWINDOW  Load the perpendicular data and set how
+            %   the anisotropy is formed. Modal.
+            if isempty(app.deltaA_raw)
+                uialert(app.fig, ['Load the data measured with parallel ' ...
+                    'polarization first (Load...).'], 'No data');
+                return;
+            end
+            f = uifigure('Name', 'Anisotropy', ...
+                'Position', app.fitFigurePosition(1240, 712), ...
+                'WindowStyle', 'modal');
+            app.applyLightTheme(f);
+            gl = uigridlayout(f, [8, 1]);
+            gl.RowHeight  = {26, 30, 30, 30, 30, '1x', 'fit', 36};
+            gl.Padding    = [10 10 10 10];
+            gl.RowSpacing = 6;
+            
+            uilabel(gl, 'Text', sprintf(['Parallel data (the data of the ' ...
+                'main window):   %s'], app.dataSourceDesc), ...
+                'FontColor', [0.2 0.2 0.2]);
+            
+            r1 = uigridlayout(gl, [1, 2]);
+            r1.ColumnWidth = {170, '1x'};  r1.Padding = [0 0 0 0];
+            uibutton(r1, 'Text', 'Load perpendicular...', ...
+                'Tooltip', ['Data file measured with perpendicular ' ...
+                    'polarization at the same wavelengths and delays. ' ...
+                    'The corrections made so far are applied to it.'], ...
+                'ButtonPushedFcn', @(~,~) onLoad());
+            lblFile = uilabel(r1, 'Text', '', 'FontColor', [0.2 0.2 0.2]);
+            
+            % the range in use while tail matching is on; otherwise a
+            % proposal for the delays as they are now
+            tl = app.aniTailT;
+            if ~app.aniTail || ~all(isfinite(tl)), tl = app.aniTailProposal(); end
+            r2 = uigridlayout(gl, [1, 9]);
+            r2.ColumnWidth = {'fit', 150, 'fit', 90, 'fit', 90, 'fit', 90, '1x'};
+            r2.Padding = [0 0 0 0];  r2.ColumnSpacing = 6;
+            uilabel(r2, 'Text', 'G (factor of the perpendicular data):', ...
+                'HorizontalAlignment', 'right');
+            ddG = uidropdown(r2, 'Items', {'Typed', 'Tail matching'}, ...
+                'ItemsData', {'typed', 'tail'}, ...
+                'Value', app.pick(app.aniTail, 'tail', 'typed'), ...
+                'Tooltip', ['Typed: the value entered. Tail matching: G ' ...
+                    'is the least-squares factor that makes G x ' ...
+                    'perpendicular equal to parallel, over all ' ...
+                    'wavelengths, in the delay range given (the noise of ' ...
+                    'both data sets is taken into account); use a range ' ...
+                    'in which the anisotropy has decayed.']);
+            uilabel(r2, 'Text', 'G:', 'HorizontalAlignment', 'right');
+            edG = uieditfield(r2, 'numeric', 'Value', app.aniG, ...
+                'ValueDisplayFormat', '%.6g');
+            uilabel(r2, 'Text', 'tail t from:', 'HorizontalAlignment', 'right');
+            edT1 = uieditfield(r2, 'numeric', 'Value', tl(1), ...
+                'ValueDisplayFormat', '%.6g');
+            uilabel(r2, 'Text', 'to:', 'HorizontalAlignment', 'right');
+            edT2 = uieditfield(r2, 'numeric', 'Value', tl(2), ...
+                'ValueDisplayFormat', '%.6g');
+            lblG = uilabel(r2, 'Text', '', 'FontColor', [0.25 0.25 0.25]);
+            
+            % a time zero that differs between the two measurements
+            sr = app.aniShiftProposal();
+            r2b = uigridlayout(gl, [1, 10]);
+            r2b.ColumnWidth = {'fit', 90, 'fit', 100, 'fit', 90, 'fit', 90, ...
+                'fit', '1x'};
+            r2b.Padding = [0 0 0 0];  r2b.ColumnSpacing = 6;
+            uilabel(r2b, 'Text', 'Time shift of the perpendicular data:', ...
+                'HorizontalAlignment', 'right');
+            edShift = uieditfield(r2b, 'numeric', 'Value', app.aniShift, ...
+                'ValueDisplayFormat', '%.6g', ...
+                'Tooltip', ['For two measurements whose time zero ' ...
+                    'differs. The perpendicular data are moved along the ' ...
+                    'delays by this much before they are combined with ' ...
+                    'the parallel data: perp(t - shift); a positive ' ...
+                    'value moves them to later delays. The values ' ...
+                    'between the delays come from a cubic spline where ' ...
+                    'the delays are equally spaced and from linear ' ...
+                    'interpolation elsewhere, as for the time shift of ' ...
+                    '"Subtract data". 0: no shift.']);
+            uilabel(r2b, 'Text', app.tUnitTxt());
+            btnEst = uibutton(r2b, 'Text', 'Estimate', ...
+                'Tooltip', ['The shift for which the perpendicular data ' ...
+                    'follow the parallel data best in the delay range ' ...
+                    'given, at every wavelength with its own factor and ' ...
+                    'offset. It assumes that the two signals have the ' ...
+                    'same shape in the range: give a range around the ' ...
+                    'rise of the signal in which the anisotropy hardly ' ...
+                    'changes. The value is entered in the field; ' ...
+                    '"Apply" uses it.'], ...
+                'ButtonPushedFcn', @(~,~) onEstimate());
+            uilabel(r2b, 'Text', 'from the delays', ...
+                'HorizontalAlignment', 'right');
+            edS1 = uieditfield(r2b, 'numeric', 'Value', sr(1), ...
+                'ValueDisplayFormat', '%.6g');
+            uilabel(r2b, 'Text', 'to:', 'HorizontalAlignment', 'right');
+            edS2 = uieditfield(r2b, 'numeric', 'Value', sr(2), ...
+                'ValueDisplayFormat', '%.6g');
+            cbZoom = uicheckbox(r2b, 'Text', 'Show these delays only', ...
+                'Value', false, ...
+                'Tooltip', ['The two plots along the delays show this ' ...
+                    'range only: the rise of the signal, where a time ' ...
+                    'shift is seen.']);
+            uilabel(r2b, 'Text', '');
+            
+            r3 = uigridlayout(gl, [1, 6]);
+            r3.ColumnWidth = {'fit', 80, 'fit', 'fit', 100, '1x'};
+            r3.Padding = [0 0 0 0];  r3.ColumnSpacing = 6;
+            uilabel(r3, 'Text', ['Leave r empty where |par + 2 G perp| ' ...
+                'is below'], 'HorizontalAlignment', 'right');
+            edThr = uieditfield(r3, 'numeric', 'Value', app.aniThr, ...
+                'Limits', [0 Inf], 'ValueDisplayFormat', '%.6g', ...
+                'Tooltip', ['Where the sum of the two signals is this ' ...
+                    'small, the ratio r is noise only. 0 keeps every value.']);
+            uilabel(r3, 'Text', 'x its noise.');
+            uilabel(r3, 'Text', app.uiStr('      Kinetics at \lambda:'), ...
+                'HorizontalAlignment', 'right');
+            edPW = uieditfield(r3, 'numeric', 'Value', app.selWL, ...
+                'ValueDisplayFormat', '%.6g');
+            uilabel(r3, 'Text', '');
+            
+            pg = uigridlayout(gl, [1, 3]);
+            pg.Padding = [0 0 0 0];  pg.ColumnSpacing = 8;
+            axK = app.boxAxes(pg, [56 14 40 40]);
+            axR = app.boxAxes(pg, [56 14 40 40]);
+            axG = app.boxAxes(pg, [56 14 40 40]);       % G of the tail matching along the spectrum
+            
+            lblMsg = uilabel(gl, 'Text', '', 'WordWrap', 'on', ...
+                'FontColor', [0.25 0.25 0.25]);
+            bot = uigridlayout(gl, [1, 4]);
+            bot.ColumnWidth = {'1x', 110, 210, 90};  bot.Padding = [0 0 0 0];
+            uilabel(bot, 'Text', '');
+            btnApply = uibutton(bot, 'Text', 'Apply', ...
+                'BackgroundColor', [0.30 0.65 0.35], 'FontColor', 'w', ...
+                'ButtonPushedFcn', @(~,~) onApply());
+            btnOff = uibutton(bot, 'Text', 'Remove perpendicular data', ...
+                'ButtonPushedFcn', @(~,~) onRemove());
+            uibutton(bot, 'Text', 'Close', ...
+                'ButtonPushedFcn', @(~,~) delete(f));
+            
+            ctl = {ddG, edG, edT1, edT2, edThr, edPW, edShift, edS1, ...
+                edS2, cbZoom};
+            for q = 1:numel(ctl)
+                ctl{q}.ValueChangedFcn = @(~,~) drawPreview();
+            end
+            refresh('');
+            
+            function refresh(msg)
+                if isempty(app.perpOrig)
+                    lblFile.Text = 'No perpendicular data loaded.';
+                else
+                    lblFile.Text = sprintf('%s   (%d x %d)', app.perpDesc, ...
+                        size(app.perpOrig, 1), size(app.perpOrig, 2));
+                end
+                btnApply.Enable = app.pick(app.aniOn, 'on', 'off');
+                btnOff.Enable   = app.pick(app.aniOn, 'on', 'off');
+                btnEst.Enable   = app.pick(app.aniOn, 'on', 'off');
+                if isempty(msg)
+                    if app.aniOn
+                        msg = sprintf(['Both polarizations get the same ' ...
+                            'corrections. The main window shows the view ' ...
+                            'chosen under "View" (now: %s); that view is ' ...
+                            'what the analysis windows work on. Their ' ...
+                            'setup and results are kept for each view.'], ...
+                            app.ddAniView.Items{strcmp(app.ddAniView.ItemsData, app.aniView)});
+                    else
+                        msg = ['Load the file measured with perpendicular ' ...
+                            'polarization. The anisotropy r = (par - G perp) ' ...
+                            '/ (par + 2 G perp) is then shown in the main ' ...
+                            'window.'];
+                    end
+                end
+                lblMsg.Text = msg;
+                drawPreview();
+            end
+            
+            function [G, tailOn, tailT, thr] = params()
+                tailOn = strcmp(ddG.Value, 'tail');
+                tailT  = [edT1.Value, edT2.Value];
+                thr    = edThr.Value;
+                G      = edG.Value;
+            end
+            
+            function drawPreview()
+                app.claAll(axK);  app.claAll(axR);  app.claAll(axG);
+                xlim(axK, 'auto');  ylim(axK, 'auto');
+                xlim(axR, 'auto');  ylim(axR, 'auto');
+                edG.Enable  = app.pick(strcmp(ddG.Value, 'typed'), 'on', 'off');
+                edT1.Enable = app.pick(strcmp(ddG.Value, 'tail'), 'on', 'off');
+                edT2.Enable = edT1.Enable;
+                lblG.Text = '';
+                xlabel(axK, sprintf('Delay time (%s)', app.tUnitAx()));
+                xlabel(axR, sprintf('Delay time (%s)', app.tUnitAx()));
+                ylabel(axK, app.sigNameOf(app.sigKind));
+                ylabel(axR, 'Anisotropy r');
+                xlabel(axG, app.xAxLabel());
+                ylabel(axG, 'G');
+                title(axG, 'G of every wavelength in the tail range');
+                if ~app.aniOn || isempty(app.aniPar), return; end
+                [G, tailOn, tailT, thr] = params();
+                tt = app.delay(:).';
+                [~, iw] = min(abs(app.wavelength(:) - edPW.Value));
+                % (the perpendicular data with the time shift entered,
+                % also before "Apply")
+                sh = edShift.Value;
+                if ~isfinite(sh), sh = app.aniShift; end
+                perp = app.aniPerpAt(sh);
+                [~, Gu] = app.aniCombine(app.aniPar, perp, tt, ...
+                    'par', G, tailOn, tailT, thr);
+                [rr, ~, nB] = app.aniCombine(app.aniPar, perp, tt, ...
+                    'r', G, tailOn, tailT, thr);
+                lblG.Text = sprintf('G = %.5g;  %d values of r left empty', Gu, nB);
+                hold(axK, 'on');
+                hk = plot(axK, tt, app.aniPar(iw, :), '-', ...
+                    'Color', [0.10 0.35 0.75], 'LineWidth', 1.2, ...
+                    'DisplayName', 'Parallel');
+                hk(2) = plot(axK, tt, Gu * perp(iw, :), '-', ...
+                    'Color', [0.85 0.20 0.15], 'LineWidth', 1.2, ...
+                    'DisplayName', 'G x perpendicular');
+                hk(3) = plot(axK, tt, (app.aniPar(iw, :) + 2 * Gu * perp(iw, :)) / 3, ...
+                    '-', 'Color', [0.45 0.45 0.45], 'LineWidth', 1.0, ...
+                    'DisplayName', 'Magic angle');
+                yline(axK, 0, 'k:', 'HandleVisibility', 'off');
+                hold(axK, 'off');
+                plot(axR, tt, rr(iw, :), '-', 'Color', [0.20 0.50 0.30], ...
+                    'LineWidth', 1.2);
+                yline(axR, 0, 'k:');
+                grid(axK, 'on');  grid(axR, 'on');
+                title(axK, sprintf('Kinetics at %.6g %s', ...
+                    app.wavelength(iw), app.xUnitAx()));
+                title(axR, sprintf('r at %.6g %s', app.wavelength(iw), ...
+                    app.xUnitAx()));
+                % the delays of the estimate only: the limits follow
+                % what is seen there
+                zr = sort([edS1.Value, edS2.Value]);
+                if cbZoom.Value && all(isfinite(zr)) && zr(1) < zr(2)
+                    mz = tt >= zr(1) & tt <= zr(2);
+                    if nnz(mz) >= 2
+                        zoomTo(axK, zr, [app.aniPar(iw, mz), ...
+                            Gu * perp(iw, mz), ...
+                            (app.aniPar(iw, mz) + 2 * Gu * perp(iw, mz)) / 3]);
+                        zoomTo(axR, zr, rr(iw, mz));
+                    end
+                end
+                legend(axK, hk, 'Location', 'best');
+                
+                % G of the tail range for every single wavelength, beside
+                % the one G in use: a check that one G holds for the
+                % whole spectrum (nothing here enters a calculation)
+                T = app.aniTailSpectrum(app.aniPar, perp, tt, tailT, Gu);
+                wlv = app.wavelength(:);
+                hold(axG, 'on');
+                hg = gobjects(0);
+                far = isfinite(T.G) & ~T.ok;
+                if any(far)
+                    hg(end+1) = plot(axG, wlv(far), T.G(far), '.', ...
+                        'Color', [0.72 0.72 0.72], 'MarkerSize', 8, ...
+                        'DisplayName', 'noise too large');
+                end
+                if any(T.ok)
+                    hg(end+1) = errorbar(axG, wlv(T.ok), T.G(T.ok), ...
+                        T.sG(T.ok), '.', 'Color', [0.10 0.35 0.75], ...
+                        'MarkerSize', 10, 'CapSize', 0, ...
+                        'DisplayName', 'one wavelength, +/- its uncertainty');
+                end
+                if isfinite(Gu)
+                    hg(end+1) = yline(axG, Gu, '--', 'Color', [0.85 0.20 0.15], ...
+                        'LineWidth', 1.2, ...
+                        'DisplayName', sprintf('G in use: %.5g', Gu));
+                end
+                hold(axG, 'off');
+                grid(axG, 'on');
+                if numel(wlv) > 1
+                    xlim(axG, [min(wlv), max(wlv)]);
+                end
+                if T.nOk >= 3
+                    yLo = min([T.G(T.ok) - T.sG(T.ok); Gu]);
+                    yHi = max([T.G(T.ok) + T.sG(T.ok); Gu]);
+                    pad = 0.08 * max(yHi - yLo, 1e-6 * max(abs(Gu), 1));
+                    ylim(axG, [yLo - pad, yHi + pad]);
+                elseif isfinite(Gu) && Gu ~= 0
+                    ylim(axG, sort(Gu * [0.5, 1.5]));
+                end
+                if isfinite(T.ratio)
+                    % (two digits below 10, whole numbers above)
+                    rTxt = app.pick(T.ratio < 9.95, sprintf('%.2g', T.ratio), ...
+                        sprintf('%.0f', T.ratio));
+                    title(axG, {'G of every wavelength in the tail range', ...
+                        sprintf('scatter: %s x what the noise explains', rTxt)});
+                end
+                if ~isempty(hg)
+                    legend(axG, hg, 'Location', 'best');
+                end
+            end
+            
+            function zoomTo(axZ, xZ, yZ)
+                % x limits xZ; y limits from the values yZ seen there
+                % (0 stays in view)
+                xlim(axZ, xZ);
+                yZ = yZ(isfinite(yZ));
+                if isempty(yZ), return; end
+                yZlo = min(yZ);  yZhi = max(yZ);
+                yZpad = 0.06 * max(yZhi - yZlo, 1e-12);
+                ylim(axZ, [min(yZlo, 0) - yZpad, max(yZhi, 0) + yZpad]);
+            end
+            
+            function onLoad()
+                [fn, fp] = uigetfile( ...
+                    {'*.csv;*.dat;*.txt', 'Data (*.csv, *.dat, *.txt)'; ...
+                     '*.*', 'All Files'}, ...
+                    'Select the data file of the perpendicular polarization', ...
+                    app.startDir());
+                figure(f);
+                if isequal(fn, 0), return; end
+                app.rememberDir(fp);
+                try
+                    [w2, t2, A2] = app.parseDataFile(fullfile(fp, fn));
+                catch ME
+                    refresh(sprintf('Failed to read the file: %s', ME.message));
+                    return;
+                end
+                [ok, msg] = app.setPerpendicular(w2, t2, A2, fn);
+                if ~ok, refresh(msg);  return; end
+                app.aniOn = true;
+                [G, tailOn, tailT, thr] = params();
+                try
+                    app.applyAnisotropy(G, tailOn, tailT, thr, edShift.Value);
+                catch ME
+                    refresh(sprintf('Failed: %s', ME.message));
+                    return;
+                end
+                refresh('');
+            end
+            
+            function onApply()
+                if ~app.aniOn, return; end
+                [G, tailOn, tailT, thr] = params();
+                if ~isfinite(G) || ~isfinite(thr) || G == 0
+                    refresh('G and the threshold must be numbers; G must not be 0.');
+                    return;
+                end
+                if tailOn && ~(all(isfinite(tailT)) && tailT(1) ~= tailT(2))
+                    refresh('Give the delay range of the tail matching.');
+                    return;
+                end
+                if ~isfinite(edShift.Value)
+                    refresh(['The time shift of the perpendicular data ' ...
+                        'must be a number (0: no shift).']);
+                    return;
+                end
+                app.applyAnisotropy(G, tailOn, tailT, thr, edShift.Value);
+                shTxt = '';
+                if app.aniShift ~= 0
+                    shTxt = sprintf([', time shift of the perpendicular ' ...
+                        'data %.5g %s'], app.aniShift, app.tUnitTxt());
+                end
+                refresh(sprintf('Applied: G = %.5g%s%s.', app.aniGUsed, ...
+                    app.pick(tailOn, ' (tail matching)', ''), shTxt));
+            end
+            
+            function onEstimate()
+                % Estimate the time shift of the perpendicular data in
+                % the delay range entered; the value goes to the field
+                % (not applied).
+                if ~app.aniOn || isempty(app.aniPar) || isempty(app.aniPerp0)
+                    return;
+                end
+                est = app.aniShiftEstimate(app.aniPar, app.aniPerp0, ...
+                    app.delay, [edS1.Value, edS2.Value]);
+                [estMsg, estD] = app.aniShiftText(est);
+                if isfinite(estD), edShift.Value = estD; end
+                refresh(estMsg);
+            end
+            
+            function onRemove()
+                app.removeAnisotropy();
+                refresh('The perpendicular data were removed.');
+            end
+        end
+        
+        % =================================================================
+        % Signal kind: dA <-> dT/T  (transient absorption)
+        % =================================================================
+        function s = sigNameOf(~, kind)
+            %SIGNAMEOF  Name of a signal kind for axis labels (TeX markup).
+            %   'dA' | 'dTT' | 'int' (intensity: TR-PL, Raman).
+            switch kind
+                case 'dTT', s = '\DeltaT/T';
+                case 'int', s = 'Intensity';
+                otherwise,  s = '\DeltaA';
+            end
+        end
+        
+        function s = sigName(app)
+            %SIGNAME  Name of the signal the working data are.
+            s = app.sigNameOf(app.sigKind);
+            if app.aniOn
+                switch app.aniView
+                    case 'perp',  s = [s ' (perpendicular)'];
+                    case 'magic', s = [s ' (magic angle)'];
+                    case 'r',     s = 'Anisotropy r';
+                    otherwise,    s = [s ' (parallel)'];
+                end
+            end
+        end
+        
+        function s = sigShort(app, kind)
+            %SIGSHORT  'dA' | 'dTT' | 'int' -> plain text for controls.
+            s = app.uiStr(app.sigNameOf(kind));
+        end
+        
+        function updateSignalLabel(app)
+            % Text beside the conversion button of the main window.
+            if isempty(app.lblSignal) || ~isvalid(app.lblSignal), return; end
+            app.updateViewControl();
+            if isempty(app.wavelength)
+                app.lblSignal.Text = '';
+            elseif app.aniOn
+                sigTxt = sprintf( ...
+                    'Signal: %s   |   two polarizations, G = %.4g%s', ...
+                    app.sigShort(app.sigKind), app.aniGUsed, ...
+                    app.pick(app.aniTail, ' (tail matching)', ''));
+                if app.aniShift ~= 0
+                    sigTxt = sprintf('%s, time shift %.4g %s', sigTxt, ...
+                        app.aniShift, app.tUnitTxt());
+                end
+                app.lblSignal.Text = sigTxt;
+            else
+                if ~strcmp(app.sigKind, app.sigOrigKind)
+                    sigTxt = sprintf('Signal: %s  (converted from %s)', ...
+                        app.sigShort(app.sigKind), ...
+                        app.sigShort(app.sigOrigKind));
+                else
+                    sigTxt = sprintf('Signal: %s', app.sigShort(app.sigKind));
+                end
+                % what is subtracted from the data
+                if app.subApplied
+                    sigTxt = sprintf( ...
+                        '%s   |   reference subtracted (scale %.4g)', ...
+                        sigTxt, app.subScale);
+                end
+                if app.solvData && strcmp(app.solvView, 'all')
+                    sigTxt = sprintf(['%s   |   solvent signal ' ...
+                        'subtracted (A = %.4g, all delays)'], sigTxt, ...
+                        app.solvDataA);
+                elseif app.solvData
+                    sigTxt = sprintf(['%s   |   solvent coherence ' ...
+                        'subtracted (A = %.4g, %.4g ... %.4g %s)'], ...
+                        sigTxt, app.solvDataA, app.solvDataWin(1), ...
+                        app.solvDataWin(2), app.tUnitTxt());
+                end
+                app.lblSignal.Text = sigTxt;
+            end
+        end
+        
+        function [B, nBad] = convertSignal(~, A, fromKind, toKind, aUnit)
+            %CONVERTSIGNAL  dA <-> dT/T, exact.
+            %   dT/T = 10^(-dA) - 1        dA = -log10(1 + dT/T)
+            %   with dA in OD; aUnit = 'mOD' means the dA values are in
+            %   units of 1e-3 OD. dT/T is a fraction (not percent).
+            %   expm1 / log1p keep small signals accurate.
+            %   dT/T <= -1 has no dA: those values become NaN and are
+            %   counted in nBad.
+            u = 1;
+            if strcmp(aUnit, 'mOD'), u = 1e-3; end
+            nBad = 0;
+            if strcmp(fromKind, toKind)
+                B = A;
+            elseif strcmp(toKind, 'dTT')
+                B = expm1(-log(10) * u * A);
+            else
+                x = A;
+                bad = x <= -1;                 % NaN stays NaN below
+                nBad = nnz(bad);
+                x(bad) = NaN;
+                B = -log1p(x) / (log(10) * u);
+            end
+        end
+        
+        function nBad = applySignalConversion(app, toKind)
+            %APPLYSIGNALCONVERSION  Convert the working data to toKind.
+            %   Like Crop, the conversion takes the data with all
+            %   corrections made so far as the new starting point: the
+            %   formula is applied to the data shown, and the flags of
+            %   the single corrections are cleared ("Reset all" still
+            %   returns to the data as loaded, in their own kind).
+            nBad = 0;
+            if isempty(app.deltaA) || strcmp(toKind, app.sigKind), return; end
+            src = app.deltaA;
+            if app.aniOn && ~isempty(app.aniPar), src = app.aniPar; end
+            [B, nBad] = app.convertSignal(src, app.sigKind, ...
+                toKind, app.sigAUnit);
+            
+            % Analysis results describe the data before the conversion.
+            app.dataChanged();
+            app.logRebase(true(numel(app.wavelength), 1), ...
+                true(1, numel(app.delay)));
+            app.corrLog{end+1} = struct('op', 'conv', 'from', app.sigKind, ...
+                'to', toKind, 'unit', app.sigAUnit);
+            
+            app.deltaA     = B;
+            app.deltaA_raw = B;
+            app.sigKind    = toKind;
+            app.markRebased();
+            
+            % All corrections are now part of deltaA_raw.
+            app.bgApplied    = false;  app.bgSpectrum = [];  app.bgN = 0;
+            app.chirpApplied = false;
+            app.chirpPts     = zeros(0,2);
+            app.chirpParams  = [];     app.chirpFitRMS = NaN;
+            app.ridgeWL      = [];     app.ridgeT      = [];
+            app.maskedRegions = cell(0, 3);
+            app.tZeroShift   = 0;
+            
+            % Color range back to automatic: the numbers changed scale.
+            app.mapZMin = [];  app.mapZMax = [];
+            if ~isempty(app.edZMin) && isvalid(app.edZMin)
+                cl = max(abs(B(:)), [], 'omitnan');
+                if isempty(cl) || cl == 0 || isnan(cl), cl = 1; end
+                app.edZMin.Value = -cl;
+                app.edZMax.Value =  cl;
+            end
+            
+            app.updateStatusLabel();
+            app.updateAll();
+        end
+        
+        function openSignalWindow(app)
+            %OPENSIGNALWINDOW  Convert the data between dA and dT/T.
+            %   Modal: the main window cannot change underneath it.
+            f = uifigure('Name', app.uiStr('Convert \DeltaA <-> \DeltaT/T'), ...
+                'Position', app.fitFigurePosition(540, 360), ...
+                'WindowStyle', 'modal');
+            app.applyLightTheme(f);
+            g = uigridlayout(f, [7, 2]);
+            g.RowHeight   = {26, 26, 'fit', 'fit', 36, '1x', 32};
+            g.ColumnWidth = {170, '1x'};
+            g.Padding     = [14 14 14 14];
+            g.RowSpacing  = 9;  g.ColumnSpacing = 8;
+            
+            uilabel(g, 'Text', 'Loaded files contain:');
+            ddLoad = uidropdown(g, ...
+                'Items', {app.sigShort('dA'), app.sigShort('dTT'), ...
+                          app.sigShort('int')}, ...
+                'ItemsData', {'dA', 'dTT', 'int'}, ...
+                'Tooltip', ['What the numbers in your data files are ' ...
+                    '(the choice made when a file is loaded). Changing ' ...
+                    'it here renames the data shown; no number changes.']);
+            uilabel(g, 'Text', app.uiStr('\DeltaA is given in:'));
+            ddUnit = uidropdown(g, 'Items', {'OD', 'mOD'}, ...
+                'Value', app.sigAUnit, ...
+                'Tooltip', app.uiStr(['Unit of the \DeltaA values, for ' ...
+                    'the conversion in both directions. \DeltaT/T is a ' ...
+                    'fraction (0.01 = 1 %).']));
+            
+            lblF = uilabel(g, 'FontColor', [0.35 0.35 0.35], 'Text', ...
+                app.uiStr(['\DeltaT/T = 10^(-\DeltaA) - 1          ' ...
+                    '\DeltaA = -log10(1 + \DeltaT/T)          ' ...
+                    '(\DeltaA in OD)']));
+            lblF.Layout.Row = 3;  lblF.Layout.Column = [1 2];
+            lblNow = uilabel(g, 'Text', '', 'FontWeight', 'bold');
+            lblNow.Layout.Row = 4;  lblNow.Layout.Column = [1 2];
+            btn = uibutton(g, 'Text', '', ...
+                'BackgroundColor', [0.30 0.55 0.80], 'FontColor', 'w', ...
+                'ButtonPushedFcn', @(~,~) onConvert());
+            btn.Layout.Row = 5;  btn.Layout.Column = [1 2];
+            lblMsg = uilabel(g, 'WordWrap', 'on', ...
+                'VerticalAlignment', 'top', 'FontColor', [0.25 0.25 0.25], ...
+                'Text', '');
+            lblMsg.Layout.Row = 6;  lblMsg.Layout.Column = [1 2];
+            bot = uigridlayout(g, [1, 2]);
+            bot.Layout.Row = 7;  bot.Layout.Column = [1 2];
+            bot.ColumnWidth = {'1x', 90};  bot.Padding = [0 0 0 0];
+            uilabel(bot, 'Text', '');
+            uibutton(bot, 'Text', 'Close', ...
+                'ButtonPushedFcn', @(~,~) delete(f));
+            
+            noteTxt = ['The conversion is applied to the data shown, with ' ...
+                'all corrections made so far, and the result becomes the ' ...
+                'new starting point (as after a crop). Analysis results ' ...
+                'are discarded. "Reset all" returns to the data as loaded.'];
+            intTxt = app.uiStr(['Intensity data are not converted. If these ' ...
+                'are transient-absorption data, choose above what the ' ...
+                'files contain (\DeltaA or \DeltaT/T).']);
+            ddLoad.ValueChangedFcn = @(~,~) onLoadKind();
+            ddUnit.ValueChangedFcn = @(~,~) onUnit();
+            refresh(noteTxt);
+            
+            function refresh(msg)
+                if isempty(app.deltaA)
+                    ddLoad.Value = app.sigLoadKind;
+                    lblNow.Text  = 'No data loaded.';
+                    btn.Text     = 'Convert';
+                    btn.Enable   = 'off';
+                elseif strcmp(app.sigKind, 'int')
+                    ddLoad.Value = app.sigOrigKind;
+                    lblNow.Text  = sprintf('The data are now:  %s', ...
+                        app.sigShort('int'));
+                    btn.Text     = 'Convert';
+                    btn.Enable   = 'off';
+                    if nargin > 0 && isequal(msg, noteTxt), msg = intTxt; end
+                else
+                    ddLoad.Value = app.sigOrigKind;
+                    if strcmp(app.sigKind, 'dA'), other = 'dTT'; else, other = 'dA'; end
+                    if strcmp(app.sigKind, app.sigOrigKind)
+                        lblNow.Text = sprintf('The data are now:  %s', ...
+                            app.sigShort(app.sigKind));
+                    else
+                        lblNow.Text = sprintf( ...
+                            'The data are now:  %s  (converted from %s)', ...
+                            app.sigShort(app.sigKind), ...
+                            app.sigShort(app.sigOrigKind));
+                    end
+                    btn.Text   = sprintf('Convert to %s', app.sigShort(other));
+                    btn.Enable = 'on';
+                end
+                if nargin > 0, lblMsg.Text = msg; end
+            end
+            
+            function onUnit()
+                app.sigAUnit = ddUnit.Value;
+                app.savePrefs();
+            end
+            
+            function onLoadKind()
+                v = ddLoad.Value;
+                if ~isempty(app.deltaA) && ~strcmp(app.sigKind, app.sigOrigKind)
+                    % converted data: what they were cannot be renamed
+                    refresh(['The data shown were converted. Press "Reset ' ...
+                        'all" in the main window first, then change this ' ...
+                        'setting.']);
+                    return;
+                end
+                app.sigLoadKind = v;
+                app.savePrefs();
+                if isempty(app.deltaA)
+                    app.sigOrigKind = v;
+                    app.sigKind     = v;
+                end
+                if ~isempty(app.deltaA) && ~strcmp(app.sigOrigKind, v)
+                    % The same numbers under another name: the analyses
+                    % made so far describe another quantity.
+                    app.dataChanged();
+                    app.sigOrigKind = v;
+                    app.sigKind     = v;
+                    app.updateStatusLabel();
+                    app.updateAll();
+                    msg = sprintf(['The data are now taken as %s. ' ...
+                        'No number was changed.'], app.sigShort(v));
+                    if strcmp(v, 'int'), msg = [msg '  ' intTxt]; end
+                    refresh(msg);
+                else
+                    refresh(noteTxt);
+                end
+            end
+            
+            function onConvert()
+                if isempty(app.deltaA), refresh('Load data first.'); return; end
+                if strcmp(app.sigKind, 'int'), refresh(intTxt); return; end
+                if strcmp(app.sigKind, 'dA'), toKind = 'dTT'; else, toKind = 'dA'; end
+                mx = max(abs(app.deltaA(:)), [], 'omitnan');
+                if isempty(mx) || isnan(mx), mx = 0; end
+                if strcmp(toKind, 'dTT') && strcmp(app.sigAUnit, 'OD') && mx > 2
+                    sel = uiconfirm(f, app.uiStr(sprintf(['The largest ' ...
+                        '|\\DeltaA| is %.4g. Taken in OD this is a very ' ...
+                        'large signal. If the file is in mOD, cancel and ' ...
+                        'choose mOD.'], mx)), 'Check the unit', ...
+                        'Options', {'Convert as OD', 'Cancel'}, ...
+                        'DefaultOption', 2, 'CancelOption', 2, ...
+                        'Icon', 'warning');
+                    if ~strcmp(sel, 'Convert as OD'), return; end
+                elseif strcmp(toKind, 'dA') && mx > 1
+                    sel = uiconfirm(f, app.uiStr(sprintf(['The largest ' ...
+                        '|\\DeltaT/T| is %.4g. \\DeltaT/T is taken as a ' ...
+                        'fraction (0.01 = 1 %%). If the file is in percent ' ...
+                        'or another unit, cancel and rescale it first.'], ...
+                        mx)), 'Check the unit', ...
+                        'Options', {'Convert', 'Cancel'}, ...
+                        'DefaultOption', 2, 'CancelOption', 2, ...
+                        'Icon', 'warning');
+                    if ~strcmp(sel, 'Convert'), return; end
+                end
+                fromKind = app.sigKind;
+                try
+                    nBad = app.applySignalConversion(toKind);
+                catch ME
+                    refresh(sprintf('Conversion failed: %s', ME.message));
+                    return;
+                end
+                msg = sprintf('Converted %s to %s (%s in %s).', ...
+                    app.sigShort(fromKind), app.sigShort(toKind), ...
+                    app.sigShort('dA'), app.sigAUnit);
+                if nBad > 0
+                    msg = sprintf(['%s  %d values with %s <= -1 have no ' ...
+                        '%s and were left empty.'], msg, nBad, ...
+                        app.sigShort('dTT'), app.sigShort('dA'));
+                end
+                refresh(msg);
+            end
+        end
+        
+        function base = getChirpBaseData(app)
+            base = app.pipelineBase();
             if app.bgApplied && ~isempty(app.bgSpectrum)
                 base = base - app.bgSpectrum;
             end
@@ -1425,7 +4618,10 @@ classdef TRSpecAnalyzer < handle
             %             smaller).
             %   'auto'  : the plain fit. When it lost the width -- the
             %             FWHM is below that width or within 20 % of it
-            %             (irfUnresolved), or its uncertainty exceeds its
+            %             (irfUnresolved), it is above half the range of
+            %             the delays (irfTooWide: the search let a time
+            %             constant go and widened the IRF instead, up to
+            %             its limit), or its uncertainty exceeds its
             %             value -- the fit is repeated in two steps: time
             %             constants with t0 and FWHM held at the start
             %             values ('plain'), then everything free from
@@ -1433,10 +4629,12 @@ classdef TRSpecAnalyzer < handle
             %             that is itself not resolved is replaced by two
             %             delay steps in the repeat. The repeat is
             %             returned when it fits better, or as well with
-            %             the first FWHM not resolved.
+            %             the first FWHM not resolved or too wide.
             % info.irfRetry: 0 no repeat, 1 result of the repeat,
             % 2 repeated, first result kept. info.fwhmAtLimit: the
             % returned FWHM is not resolved (irfUnresolved).
+            % info.fwhmTooWide: the returned FWHM is above half the range
+            % of the delays (info.fwhmHi).
             %
             % Backward compatibility: if betaInit/stretchOn are not given
             % (or stretchOn is all-false), behavior matches the previous
@@ -1777,15 +4975,22 @@ classdef TRSpecAnalyzer < handle
                 't0Std', t0Std, 'fwhmStd', fwhmStd, ...
                 'caOrder', caK, 'caSpec', caSpec, 'caFwhm', caWout, ...
                 'caFwhmStd', caStd, 'caMode', ca.mode, ...
-                'fwhmLo', NaN, 'fwhmAtLimit', false, 'irfRetry', 0);
+                'fwhmLo', NaN, 'fwhmAtLimit', false, 'irfRetry', 0, ...
+                'fwhmHi', NaN, 'fwhmTooWide', false);
             if ~fwhmFixed && fwRes > 0
                 info.fwhmLo      = fwRes;
                 info.fwhmAtLimit = app.irfUnresolved(fwhmOut, fwRes);
             end
-
+            % (the upper limit of the search is the range of the delays)
+            tSpanIrf = max(t) - min(t);
+            if ~fwhmFixed
+                info.fwhmHi      = 0.5 * tSpanIrf;
+                info.fwhmTooWide = app.irfTooWide(fwhmOut, tSpanIrf);
+            end
+            
             % ---- two-step repeat when the IRF width was lost ----
             if ~fwhmFixed && strcmp(fwMode, 'auto') && ~isempty(x0) && ...
-                    app.irfWidthLost(fwhmOut, fwhmStd, fwRes)
+                    app.irfWidthLost(fwhmOut, fwhmStd, fwRes, tSpanIrf)
                 % A start value that the delays do not resolve gives
                 % the search nothing to go by: two delay steps instead.
                 fwS0 = fwhmInit;
@@ -1801,7 +5006,7 @@ classdef TRSpecAnalyzer < handle
                         betaS1, stretchOn, irfMode, tRange, ca, 'limit');
                     itAll = info.iters + infoS1.iters + infoS2.iters;
                     if infoS2.rss < info.rss * (1 - 1e-6) || ...
-                            (info.fwhmAtLimit && ...
+                            ((info.fwhmAtLimit || info.fwhmTooWide) && ...
                              infoS2.rss <= info.rss * (1 + 1e-6))
                         infoS2.initialLoss = info.initialLoss;
                         infoS2.initialRMS  = info.initialRMS;
@@ -1841,22 +5046,35 @@ classdef TRSpecAnalyzer < handle
             tf = fwRes > 0 && fw <= 1.2 * fwRes;
         end
         
-        function tf = irfWidthLost(app, fw, fwStd, fwRes)
+        function tf = irfTooWide(~, fw, tSpan)
+            %irfTooWide  True when a fitted IRF FWHM is more than half the
+            %   range of the delays (tSpan; 0 = unknown): that is no
+            %   instrument response. A search that has let a time
+            %   constant go and widens the IRF instead ends there, at its
+            %   upper limit (the range of the delays).
+            tf = tSpan > 0 && fw > 0.5 * tSpan;
+        end
+        
+        function tf = irfWidthLost(app, fw, fwStd, fwRes, tSpan)
             %irfWidthLost  True when a fitted IRF FWHM is not a usable
-            %   result: the delays do not resolve it (irfUnresolved), its
-            %   uncertainty is not a finite number, or the uncertainty
-            %   exceeds the value.
+            %   result: the delays do not resolve it (irfUnresolved), it
+            %   is wider than half the range of the delays (irfTooWide;
+            %   tSpan, 0 or left out = not looked at), its uncertainty is
+            %   not a finite number, or the uncertainty exceeds the value.
+            if nargin < 5, tSpan = 0; end
             tf = app.irfUnresolved(fw, fwRes) || ...
+                app.irfTooWide(fw, tSpan) || ...
                 ~isfinite(fwStd) || fwStd > fw;
         end
 
         function L = irfLimitNote(app, info)
             %irfLimitNote  Lines for the result text of a fit (1 x n
             %   cell) when the fitted IRF FWHM is not resolved by the
-            %   delays, and when the result comes from the two-step
-            %   repeat (see fitGlobalAnalysis). Empty when there is
-            %   nothing to say. info: struct with fwhmAtLimit, fwhmLo,
-            %   irfRetry (missing fields are taken as "no").
+            %   delays or is wider than half their range, and when the
+            %   result comes from the two-step repeat (see
+            %   fitGlobalAnalysis). Empty when there is nothing to say.
+            %   info: struct with fwhmAtLimit, fwhmLo, fwhmTooWide,
+            %   fwhmHi, irfRetry (missing fields are taken as "no").
             L = {};
             if ~isstruct(info) || ~isscalar(info), return; end
             if isfield(info, 'fwhmAtLimit') && isequal(info.fwhmAtLimit, true)
@@ -1869,6 +5087,20 @@ classdef TRSpecAnalyzer < handle
                     lim, app.tUnitTxt());
                 L{end+1} = '  the delays do not resolve such a';
                 L{end+1} = '  width. Fix it at a known value.';
+            end
+            if isfield(info, 'fwhmTooWide') && isequal(info.fwhmTooWide, true)
+                lim = NaN;
+                if isfield(info, 'fwhmHi') && isscalar(info.fwhmHi)
+                    lim = info.fwhmHi;
+                end
+                % (three digits; a whole number from 100 on)
+                limTxt = sprintf('%.3g', lim);
+                if lim >= 100, limTxt = sprintf('%d', floor(lim + 0.5)); end
+                L{end+1} = '  FWHM is above half the range of the';
+                L{end+1} = sprintf('  delays (%s %s): the data do not', ...
+                    limTxt, app.tUnitTxt());
+                L{end+1} = '  determine the IRF width. Fix it at a';
+                L{end+1} = '  known value.';
             end
             if isempty(L) && isfield(info, 'irfRetry') && ...
                     isequal(info.irfRetry, 1)
@@ -4060,15 +7292,22 @@ classdef TRSpecAnalyzer < handle
                 'nFree', nFree, 'tSel', tSel, 'reordered', reordered, ...
                 'caOrder', caK, 'caSpec', caSpec, 'caFwhm', caWout, ...
                 'caFwhmStd', caStd, 'caMode', ca.mode, ...
-                'fwhmLo', NaN, 'fwhmAtLimit', false, 'irfRetry', 0);
+                'fwhmLo', NaN, 'fwhmAtLimit', false, 'irfRetry', 0, ...
+                'fwhmHi', NaN, 'fwhmTooWide', false);
             if ~fwhmFixed && fwRes > 0
                 info.fwhmLo      = fwRes;
                 info.fwhmAtLimit = app.irfUnresolved(fwhmOut, fwRes);
             end
-
+            % (the upper limit of the search is the range of the delays)
+            tSpanIrf = tSpan;
+            if ~fwhmFixed
+                info.fwhmHi      = 0.5 * tSpanIrf;
+                info.fwhmTooWide = app.irfTooWide(fwhmOut, tSpanIrf);
+            end
+            
             % ---- two-step repeat when the IRF width was lost ----
             if ~fwhmFixed && strcmp(fwMode, 'auto') && ~isempty(x0) && ...
-                    app.irfWidthLost(fwhmOut, fwhmStd, fwRes)
+                    app.irfWidthLost(fwhmOut, fwhmStd, fwRes, tSpanIrf)
                 % A start value that the delays do not resolve gives
                 % the search nothing to go by: two delay steps instead.
                 fwS0 = fwhmInit;
@@ -4089,7 +7328,7 @@ classdef TRSpecAnalyzer < handle
                         irfMode, tRange, tauLo, tauHi, ca, 'limit');
                     itAll = info.iters + infoS1.iters + infoS2.iters;
                     if infoS2.rss < info.rss * (1 - 1e-6) || ...
-                            (info.fwhmAtLimit && ...
+                            ((info.fwhmAtLimit || info.fwhmTooWide) && ...
                              infoS2.rss <= info.rss * (1 + 1e-6))
                         infoS2.initialRMS = info.initialRMS;
                         tauOut = tauS2;  t0Out = t0S2;  fwhmOut = fwS2;
@@ -4669,14 +7908,22 @@ classdef TRSpecAnalyzer < handle
             end
             
             % --- Normalization ---
+            % normScale: what the raw |FFT|^2 was divided by (1, the
+            % largest value, or one value per wavelength). A second map
+            % is put on the same scale by dividing its raw |FFT|^2 by it.
+            normScale = 1;
             switch lower(options.normMode)
                 case 'peak'
                     pk = max(P(:), [], 'omitnan');
-                    if isfinite(pk) && pk > 0, P = P / pk; end
+                    if isfinite(pk) && pk > 0
+                        P = P / pk;
+                        normScale = pk;
+                    end
                 case 'perwl'
                     pkW = max(P, [], 2, 'omitnan');
                     pkW(pkW <= 0) = 1;
                     P = P ./ pkW;
+                    normScale = pkW;
                 case 'none'
                     % keep raw
             end
@@ -4689,6 +7936,7 @@ classdef TRSpecAnalyzer < handle
                 'detrend', options.detrend, ...
                 'freqUnit', options.freqUnit, ...
                 'normMode', options.normMode, ...
+                'normScale', normScale, ...
                 'Phimap', Phi);    % raw phase, Nwl x Nfreq, [-pi, pi]
         end
         
@@ -5106,15 +8354,22 @@ classdef TRSpecAnalyzer < handle
                 'irfMode', irfMode, ...
                 'tauStd', tauStd, 'betaStd', betaStd, ...
                 't0Std', t0Std, 'fwhmStd', fwhmStd, ...
-                'fwhmLo', NaN, 'fwhmAtLimit', false, 'irfRetry', 0);
+                'fwhmLo', NaN, 'fwhmAtLimit', false, 'irfRetry', 0, ...
+                'fwhmHi', NaN, 'fwhmTooWide', false);
             if fwhmFree && fwRes > 0
                 info.fwhmLo      = fwRes;
                 info.fwhmAtLimit = app.irfUnresolved(fwhmOut, fwRes);
             end
-
+            % (the upper limit of the search is the range of the delays)
+            tSpanIrf = max(t) - min(t);
+            if fwhmFree
+                info.fwhmHi      = 0.5 * tSpanIrf;
+                info.fwhmTooWide = app.irfTooWide(fwhmOut, tSpanIrf);
+            end
+            
             % ---- two-step repeat when the IRF width was lost ----
             if fwhmFree && strcmp(fwMode, 'auto') && ...
-                    app.irfWidthLost(fwhmOut, fwhmStd, fwRes)
+                    app.irfWidthLost(fwhmOut, fwhmStd, fwRes, tSpanIrf)
                 % A start value that the delays do not resolve gives
                 % the search nothing to go by: two delay steps instead.
                 fwS0 = fwhmInit;
@@ -5130,7 +8385,7 @@ classdef TRSpecAnalyzer < handle
                         fwhmFixed, hasInf, irfMode, tRange, 'limit');
                     itAll = info.iter + infoS1.iter + infoS2.iter;
                     if infoS2.fval < info.fval * (1 - 1e-6) || ...
-                            (info.fwhmAtLimit && ...
+                            ((info.fwhmAtLimit || info.fwhmTooWide) && ...
                              infoS2.fval <= info.fval * (1 + 1e-6))
                         tauOut = tauS2;  betaOut = betaS2;
                         t0Out  = t0S2;   fwhmOut = fwS2;
@@ -5861,11 +9116,7 @@ classdef TRSpecAnalyzer < handle
                     % Same operation as the chirp correction of the main
                     % window (recompute).
                     try
-                        for i = 1:M
-                            if ~isfinite(ch.t0(i)), Dc(i, :) = NaN;  continue; end
-                            Dc(i, :) = interp1(t, Db(i, :), t + ch.t0(i), ...
-                                'linear', NaN);
-                        end
+                        Dc = app.chirpShiftCalc(t(:).', Db, ch.t0(:));
                         t0Guess = 0;
                     catch errI
                         % e.g. two identical delay values
@@ -6600,6 +9851,39 @@ classdef TRSpecAnalyzer < handle
             if isempty(keep), O.status = 'nopeak'; else, O.status = 'found'; end
         end
 
+        function s = autoDoneText(~, P)
+            %autoDoneText  Status line of the Auto Analysis window after a run.
+            %   Whether corrections are proposed, and which of the steps
+            %   could not be decided: the background (too few delays
+            %   before the signal, first delays that look like signal, no
+            %   time zero), the mask (too many noisy channels) or the
+            %   chirp (no time zero, or no reliable time zero along the
+            %   spectrum). Of such a step the run does not say that no
+            %   correction is needed; it is listed under "To check by
+            %   eye" in the report.
+            und = {};
+            if any(strcmp(P.bgStatus, {'few', 'signal', 'notime0'}))
+                und{end+1} = 'background';
+            end
+            if strcmp(P.maskStatus, 'toomany')
+                und{end+1} = 'mask';
+            end
+            if any(strcmp(P.chirp.status, {'failed', 'notime0'}))
+                und{end+1} = 'chirp';
+            end
+            if P.changed
+                s = 'Done. The data are unchanged so far.';
+            elseif isempty(und)
+                s = 'Done. No correction was needed.';
+            else
+                s = 'Done. No correction proposed.';
+            end
+            if ~isempty(und)
+                s = sprintf('%s Not determined: %s (see Report).', s, ...
+                    strjoin(und, ', '));
+            end
+        end
+        
         function L = autoReportLines(app, P, S, src)
             %autoReportLines  Text of the automatic-analysis report
             %   (cell array of lines, plain ASCII).
@@ -7351,7 +10635,7 @@ classdef TRSpecAnalyzer < handle
                 ylim(ax, [ylo, yhi]);
                 
                 if k == 1 && isempty(app.cbarAx)
-                    cb = colorbar(ax);  cb.Label.String = '\DeltaA or Intensity';
+                    cb = colorbar(ax);  cb.Label.String = app.sigName();
                 end
                 
                 if k == numel(app.ax2D)
@@ -7378,12 +10662,445 @@ classdef TRSpecAnalyzer < handle
             if ~isempty(app.cbarAx) && isvalid(app.cbarAx)
                 app.cbarAx.CLim = [cMin, cMax];
                 colormap(app.cbarAx, cmap);
-                cb = colorbar(app.cbarAx);
-                cb.Label.String = '\DeltaA or Intensity';
+                cb = app.hostCbar(app.cbarAx);
+                cb.Label.String = app.sigName();
+                % (the plot boxes for the size the panel has now; the bar
+                % from the lower edge of the lower box to the upper edge
+                % of the upper one)
+                app.layoutMap2D();
+                app.placeCbar(cb, [4 14] / 85, app.mapBarYH);
             end
             % Let the renderer flush before any further graphics ops
             % (drawSpectrum / drawKinetics / overlays) are queued.
             drawnow limitrate;
+        end
+        
+        function layoutMap2D(app)
+            %LAYOUTMAP2D  Places the two panels of the split 2D map.
+            %   The plot boxes of the upper (log) and of the lower (linear)
+            %   panel get the same left and right edge (splitMapBoxes),
+            %   and the colorbar reaches from the lower edge of the lower
+            %   box to the upper edge of the upper one. Called when the
+            %   axes are built, when the size of their panel changes, and
+            %   when the map is drawn.
+            %   The boxes are set in normalized units, computed for the
+            %   size the panel has now: between two calls they follow
+            %   the panel by themselves.
+            if numel(app.ax2D) ~= 2 || isempty(app.pnlMap2D) || ...
+                    ~isvalid(app.pnlMap2D)
+                return;
+            end
+            try
+                sz = app.pnlMap2D.Position(3:4);
+                if any(sz < 120) || isequal(sz, [260 221])
+                    % (the grid has not placed the panel yet: the size
+                    % it had last)
+                    sz = app.mapPanelSize;
+                else
+                    app.mapPanelSize = sz;
+                end
+                lay = app.splitMapBoxes(sz(1), sz(2));
+                for k = 1:2
+                    if ~isvalid(app.ax2D(k)), continue; end
+                    try
+                        app.ax2D(k).Units = 'normalized';
+                        app.ax2D(k).PositionConstraint = 'innerposition';
+                        app.ax2D(k).InnerPosition = lay.norm(k, :);
+                    catch
+                        % (normalized units refused: the same boxes in
+                        % pixels, as in the side-by-side window of the
+                        % Coherence window)
+                        app.ax2D(k).Units = 'pixels';
+                        app.ax2D(k).PositionConstraint = 'innerposition';
+                        app.ax2D(k).InnerPosition = lay.box(k, :);
+                    end
+                end
+                app.mapBarYH = lay.bar;
+                if ~isempty(app.cbarAx) && isvalid(app.cbarAx)
+                    cb = findall(app.cbarAx.Parent, 'Type', 'colorbar');
+                    if ~isempty(cb)
+                        app.placeCbar(cb(1), [4 14] / 85, app.mapBarYH);
+                    end
+                end
+            catch
+                % the map stays as it is
+            end
+        end
+        
+        function lay = splitMapBoxes(~, W, H)
+            %SPLITMAPBOXES  Layout of the split 2D map of the main window.
+            %   lay = splitMapBoxes(W, H) for a panel of W x H pixels:
+            %     lay.box   the plot boxes of the upper (log) and of the
+            %               lower (linear) panel, one row each,
+            %               [left bottom width height] in pixels
+            %     lay.norm  the same, normalized to the panel
+            %     lay.bar   [bottom height] of the colorbar, normalized to
+            %               the height of the panel (its cell is as high)
+            %   A plot box is the frame of the axes alone, without tick
+            %   labels, axis labels and title. Both boxes have the same
+            %   left and right edge. The room around them does not depend
+            %   on the size of the panel: left for the tick labels and the
+            %   label of the delay axis, right for the last tick label of
+            %   the spectral axis, above each box for its title, and below
+            %   the lower box for the tick labels and the label of the
+            %   spectral axis. The height is shared as two rows 2 : 1 of
+            %   a grid would share it.
+            mL = 58;  mR = 18;  mT = 24;  mB = 38;
+            rowGap = 10;  mLow = 4;
+            w  = max(W - mL - mR, 40);
+            hTopRow = round((H - rowGap) * 2 / 3);
+            hBotRow = H - rowGap - hTopRow;
+            y1 = hBotRow + rowGap + mLow;
+            h1 = max(hTopRow - mLow - mT, 20);
+            h2 = max(hBotRow - mB - mT, 20);
+            lay.box  = [mL + 1, y1 + 1, w, h1; ...
+                        mL + 1, mB + 1, w, h2];
+            lay.norm = [mL / W, y1 / H, w / W, h1 / H; ...
+                        mL / W, mB / H, w / W, h2 / H];
+            lay.bar  = [mB / H, (y1 + h1 - mB) / H];
+        end
+        
+        function ax = boxAxes(app, parent, m, row, col)
+            %BOXAXES  An axes whose plot box keeps fixed distances from the
+            %edges of its cell in a grid layout.
+            %   ax = boxAxes(parent, m) makes a uiaxes in the next free
+            %   cell of the grid layout parent, ax = boxAxes(parent, m,
+            %   row, col) in the cell (row, col); row or col may be [].
+            %   m = [left right top bottom] is the room in pixels between
+            %   the edges of the cell and the plot box, the frame of the
+            %   axes without tick labels, axis labels and title: left for
+            %   the tick labels and the label of the y-axis, right for
+            %   the last tick label of the x-axis (or a colorbar, see
+            %   boxCbar), top for the title, bottom for the tick labels
+            %   and the label of the x-axis.
+            %   Plots in one column of a grid with the same room left and
+            %   right have the same left and right edge, plots in one row
+            %   with the same room above and below the same upper and
+            %   lower edge. A uiaxes that is itself the cell of a grid
+            %   gives its plot box the room its own labels leave, and the
+            %   boxes of a row or column differ.
+            %   The axes is in a panel without border that fills the cell
+            %   (ax.Parent); what is drawn outside that panel is not
+            %   shown. The box is put in place again whenever the size of
+            %   the panel changes (fitBox).
+            pn = uipanel(parent, 'BorderType', 'none');
+            if nargin >= 4 && ~isempty(row), pn.Layout.Row = row; end
+            if nargin >= 5 && ~isempty(col), pn.Layout.Column = col; end
+            try, pn.AutoResizeChildren = 'off'; catch, end
+            pn.UserData = struct('plotBox', m, 'size', []);
+            ax = uiaxes(pn);
+            app.fitBox(ax);
+            pn.SizeChangedFcn = @(~,~) app.fitBox(ax);
+        end
+        
+        function fitBox(app, ax, m)
+            %FITBOX  Puts the plot box of an axes made by boxAxes in place.
+            %   fitBox(ax) sets the plot box for the size its panel has
+            %   now, and the colorbar of the axes beside it if there is
+            %   one. fitBox(ax, m) first changes the room around the box
+            %   to m = [left right top bottom].
+            %   The box is set in normalized units, computed for the
+            %   present size: between two calls it follows the panel by
+            %   itself. While the grid has not placed the panel yet (or a
+            %   column of the grid is closed), the size it had last is
+            %   used. For any other axes nothing happens.
+            try
+                if isempty(ax) || ~isvalid(ax), return; end
+                pn = ax.Parent;
+                ud = pn.UserData;
+                if ~isstruct(ud) || ~isfield(ud, 'plotBox'), return; end
+                if nargin >= 3, ud.plotBox = m; end
+                sz = pn.Position(3:4);
+                if any(sz < 40) || isequal(sz, [260 221])
+                    if numel(ud.size) == 2
+                        sz = ud.size;
+                    else
+                        sz = [480 360];
+                    end
+                else
+                    ud.size = sz;
+                end
+                pn.UserData = ud;
+                m = ud.plotBox;
+                w = max(sz(1) - m(1) - m(2), 10);
+                h = max(sz(2) - m(3) - m(4), 10);
+                try
+                    ax.Units = 'normalized';
+                    ax.PositionConstraint = 'innerposition';
+                    ax.InnerPosition = [m(1) / sz(1), m(4) / sz(2), ...
+                                        w / sz(1), h / sz(2)];
+                catch
+                    % (normalized units refused: the same box in pixels)
+                    ax.Units = 'pixels';
+                    ax.PositionConstraint = 'innerposition';
+                    ax.InnerPosition = [m(1) + 1, m(4) + 1, w, h];
+                end
+                cb = findall(pn, 'Type', 'colorbar');
+                if ~isempty(cb)
+                    % the bar: 8 pixels right of the box, 10 wide, as
+                    % high as the box; its tick labels and its label in
+                    % the rest of the room
+                    cb(1).Units    = 'normalized';
+                    cb(1).Position = [(m(1) + w + 8) / sz(1), ...
+                        m(4) / sz(2), 10 / sz(1), h / sz(2)];
+                end
+            catch
+                % the plot stays as it is
+            end
+        end
+        
+        function cb = boxCbar(app, ax, show)
+            %BOXCBAR  The colorbar of an axes made by boxAxes.
+            %   cb = boxCbar(ax) returns the colorbar of ax and makes it
+            %   at the first call; boxCbar(ax, false) removes it. The bar
+            %   is placed by hand in the room right of the plot box
+            %   (fitBox), so that the box stays where it is; that room
+            %   has to be wide enough (74 pixels).
+            %   A bar that was placed by hand is not found by
+            %   colorbar(ax), which would add a further bar at every call
+            %   (see hostCbar); the bar is looked up in the panel of the
+            %   axes instead.
+            %   For any other axes this is colorbar(ax) or
+            %   colorbar(ax, 'off').
+            if nargin < 3, show = true; end
+            cb = [];
+            pn = [];
+            try
+                p = ax.Parent;
+                if isstruct(p.UserData) && isfield(p.UserData, 'plotBox')
+                    pn = p;
+                end
+            catch
+            end
+            if isempty(pn)
+                if show
+                    cb = colorbar(ax);
+                else
+                    colorbar(ax, 'off');
+                end
+                return;
+            end
+            old = findall(pn, 'Type', 'colorbar');
+            if ~show
+                delete(old);
+                return;
+            end
+            if isempty(old)
+                cb = colorbar(ax);
+            else
+                cb = old(1);
+                if numel(old) > 1, delete(old(2:end)); end
+            end
+            app.fitBox(ax);
+        end
+        
+        function lay = alignStack(app, pnl, axs, weights, gap, mL, mR, mT, mB)
+            %ALIGNSTACK  Places axes that stand above each other in a panel.
+            %   alignStack(pnl, axs, weights, gap, mL, mR, mT, mB) gives
+            %   the plot boxes of the axes axs (from top to bottom) the
+            %   same left and right edge in the panel pnl; the numbers
+            %   are those of stackBoxes, for the size the panel has now.
+            %   As cells of a grid, each axes gives its plot box the room
+            %   its own labels leave, and the boxes differ in width.
+            %   To be called when the axes are made, when the size of
+            %   the panel changes (its SizeChangedFcn, with
+            %   AutoResizeChildren 'off') and after a plot was drawn.
+            %   The boxes are set in normalized units: between two calls
+            %   they follow the panel by themselves. The size of the
+            %   panel is kept in its UserData and used while the grid
+            %   has not placed the panel yet.
+            %   lay is the layout used (empty if nothing was placed).
+            lay = [];
+            if isempty(pnl) || ~isvalid(pnl), return; end
+            try
+                sz = pnl.Position(3:4);
+                if any(sz < 120) || isequal(sz, [260 221])
+                    if isnumeric(pnl.UserData) && numel(pnl.UserData) == 2
+                        sz = pnl.UserData;
+                    else
+                        sz = [640 560];
+                    end
+                else
+                    pnl.UserData = sz;
+                end
+                lay = app.stackBoxes(sz(1), sz(2), weights, gap, ...
+                    mL, mR, mT, mB);
+                for k = 1:numel(axs)
+                    if ~isvalid(axs(k)), continue; end
+                    try
+                        axs(k).Units = 'normalized';
+                        axs(k).PositionConstraint = 'innerposition';
+                        axs(k).InnerPosition = lay.norm(k, :);
+                    catch
+                        % (normalized units refused: the same boxes in
+                        % pixels)
+                        axs(k).Units = 'pixels';
+                        axs(k).PositionConstraint = 'innerposition';
+                        axs(k).InnerPosition = lay.box(k, :);
+                    end
+                end
+            catch
+                % the plots stay as they are
+            end
+        end
+        
+        function lay = stackBoxes(~, W, H, weights, gap, mL, mR, mT, mB)
+            %STACKBOXES  Plot boxes of plots that stand above each other.
+            %   lay = stackBoxes(W, H, weights, gap, mL, mR, mT, mB) for a
+            %   panel of W x H pixels with numel(weights) plots, from top
+            %   to bottom:
+            %     lay.box   one row per plot, [left bottom width height]
+            %               of its plot box in pixels
+            %     lay.norm  the same, normalized to the panel
+            %   A plot box is the frame of the axes alone, without tick
+            %   labels, axis labels and title. All boxes have the same
+            %   left and right edge: mL pixels from the left edge of the
+            %   panel (tick labels and label of the y-axis), mR from the
+            %   right one. The height is shared as the rows of a grid
+            %   with these weights and the spacing gap would share it;
+            %   in its row a box leaves mT pixels above it (title) and
+            %   mB below (tick labels and label of the x-axis). mT and mB
+            %   are one number, or one per plot.
+            n = numel(weights);
+            if isscalar(mT), mT = repmat(mT, 1, n); end
+            if isscalar(mB), mB = repmat(mB, 1, n); end
+            w = max(W - mL - mR, 40);
+            hRows = H - gap * (n - 1);
+            hRow  = round(hRows * weights(:).' / sum(weights));
+            hRow(n) = hRows - sum(hRow(1:n-1));
+            lay.box  = zeros(n, 4);
+            lay.norm = zeros(n, 4);
+            yTop = H;
+            for k = 1:n
+                h  = max(hRow(k) - mT(k) - mB(k), 20);
+                y0 = yTop - hRow(k) + mB(k);
+                lay.box(k, :)  = [mL + 1, y0 + 1, w, h];
+                lay.norm(k, :) = [mL / W, y0 / H, w / W, h / H];
+                yTop = yTop - hRow(k) - gap;
+            end
+        end
+        
+        function hc = newCbarHost(~, g, row, col)
+            %NEWCBARHOST  Cell for a colorbar alone.
+            %   hc = newCbarHost(g, row, col) makes the cell in the grid
+            %   layout g. hc = newCbarHost(p) makes it in the panel p; the
+            %   caller places it there (hc.Parent.Position).
+            %   A panel without border that holds an invisible axes. The
+            %   axes fills the panel and carries the color limits and the
+            %   colormap of the bar; hc is that axes. The bar itself is
+            %   placed by hand, see placeCbar.
+            %   An invisible axes directly in the cell, with the bar beside
+            %   it, does not do: the automatic layout keeps part of the
+            %   cell for the axes, and the label of the bar is cut off at
+            %   the edge of the cell.
+            p = uipanel(g, 'BorderType', 'none');
+            if nargin >= 4
+                p.Layout.Row = row;  p.Layout.Column = col;
+            end
+            hc = uiaxes(p);
+            hc.Visible = 'off';
+            try
+                hc.Units    = 'normalized';
+                hc.Position = [0 0 1 1];
+            catch
+                % placeCbar does not depend on the size of the axes
+            end
+            try, disableDefaultInteractivity(hc); catch, end
+            try, hc.Toolbar.Visible = 'off'; catch, end
+        end
+        
+        function cb = hostCbar(~, hc, show)
+            %HOSTCBAR  The one colorbar of a cell made by newCbarHost.
+            %   cb = hostCbar(hc) returns the bar of the cell and makes it
+            %   at the first call. hostCbar(hc, false) removes it.
+            %   colorbar(hc) alone does not do: it only finds a bar that is
+            %   at the place it would put one itself. A bar that was placed
+            %   by hand is not found, and every call would add a further
+            %   bar on top of the others.
+            cb  = [];
+            old = findall(hc.Parent, 'Type', 'colorbar');
+            if nargin > 2 && ~show
+                delete(old);
+                return;
+            end
+            if isempty(old)
+                cb = colorbar(hc);
+            else
+                cb = old(1);
+                if numel(old) > 1, delete(old(2:end)); end
+            end
+        end
+        
+        function placeCbar(~, cb, xw, yh)
+            %PLACECBAR  Place the colorbar of a cell made by newCbarHost.
+            %   xw = [left, width] and yh = [bottom, height] of the bar,
+            %   normalized to the cell: the bar at the left edge of the
+            %   cell, the tick labels and the label in the rest of the
+            %   width.
+            %   Setting the position takes the bar out of the automatic
+            %   layout. A bar placed by hand has its tick labels and its
+            %   label on the side that faces outward ('out'); for a bar at
+            %   the left edge of its cell that is the left side, where
+            %   there is no room. 'in' puts them on the side that faces
+            %   inward, the right one.
+            %   If this fails, the bar stays as it is: the map is drawn
+            %   all the same.
+            try
+                cb.Units        = 'normalized';
+                cb.Position     = [xw(1), yh(1), xw(2), yh(2)];
+                cb.AxisLocation = 'in';
+            catch
+            end
+        end
+        
+        function lay = sideBySideBoxes(~, W, H)
+            %SIDEBYSIDEBOXES  Layout of the side-by-side window of the
+            %Coherence window (before / after the solvent subtraction).
+            %   lay = sideBySideBoxes(W, H) for a window of W x H pixels.
+            %   Every place is [left bottom width height] in pixels:
+            %     lay.top    the row of the controls, in the window
+            %     lay.plot   the panel of the plots, in the window
+            %     lay.mapB, lay.mapA    the plot boxes of the two maps
+            %     lay.specS, lay.specV  the plot boxes of the two spectra
+            %     lay.host   the cell of the color bar
+            %   (the last five in the panel of the plots), and
+            %     lay.bar    [left width bottom height] of the color bar,
+            %                normalized to its cell (placeCbar).
+            %   A plot box is the frame of the axes alone, without tick
+            %   labels, axis labels and title. A spectrum has the left and
+            %   the right edge of the map above it, and the color bar is as
+            %   high as the maps. The room around the boxes does not depend
+            %   on the size of the window: left of a box for the tick
+            %   labels and the label of its y-axis, below it for those of
+            %   the x-axis, above it for the title, and right of the second
+            %   map for the color bar. Maps and spectra share the height
+            %   1.3 : 1.
+            %   The cell of the color bar is a panel, and a panel hides
+            %   what an axes draws behind it: it begins cGap right of the
+            %   map, clear of the last tick label of its x-axis.
+            padX = 10;  padY = 8;  hTop = 26;  rowGap = 6;
+            mL = 66;  mGap = 70;  mB = 46;  mT = 28;
+            cGap = 18;  cW = 74;
+            hPlot = max(H - padY - hTop - rowGap, 200);
+            lay.top  = [padX + 1, H - padY - hTop + 1, ...
+                        max(W - 2 * padX, 100), hTop];
+            lay.plot = [1, 1, W, hPlot];
+            w  = max(floor((W - 2 * padX - mL - mGap - cGap - cW) / 2), 40);
+            x1 = padX + mL;
+            x2 = x1 + w + mGap;
+            hRows = hPlot - padY - rowGap;
+            hM = round(hRows * 1.3 / 2.3);
+            hS = hRows - hM;
+            yS = padY;
+            yM = padY + hS + rowGap;
+            bM = max(hM - mB - mT, 20);
+            bS = max(hS - mB - mT, 20);
+            lay.mapB  = [x1 + 1, yM + mB + 1, w, bM];
+            lay.mapA  = [x2 + 1, yM + mB + 1, w, bM];
+            lay.specS = [x1 + 1, yS + mB + 1, w, bS];
+            lay.specV = [x2 + 1, yS + mB + 1, w, bS];
+            lay.host  = [x2 + w + cGap + 1, yM + 1, cW, hM];
+            lay.bar   = [2 / cW, 10 / cW, mB / hM, bM / hM];
         end
         
         function h = plotHeatmapOn(app, ax, t, data)
@@ -7431,7 +11148,7 @@ classdef TRSpecAnalyzer < handle
                 'HitTest', 'off', 'PickableParts', 'none');
             hold(ax, 'off');
             xlabel(ax, app.xAxLabel());
-            ylabel(ax, '\DeltaA or Intensity');
+            ylabel(ax, app.sigName());
             grid(ax, 'on');
             xlim(ax, [min(app.wavelength), max(app.wavelength)]);
             if numel(legH) > 1
@@ -7502,7 +11219,7 @@ classdef TRSpecAnalyzer < handle
                 end
                 hold(ax, 'off');
                 xlabel(ax, sprintf('Delay time (%s)', app.tUnitAx()));
-                ylabel(ax, '\DeltaA or Intensity');
+                ylabel(ax, app.sigName());
                 grid(ax, 'on');
                 set(ax, 'XScale', scales{k});
                 [xlo, xhi] = app.clipViewToMask(tSub, scales{k});
@@ -7569,14 +11286,23 @@ classdef TRSpecAnalyzer < handle
         
         function str = mapTitle(app, scaleStr)
             parts = {};
+            if app.subApplied,   parts{end+1} = 'ref. subtracted'; end
             if app.bgApplied,    parts{end+1} = sprintf('BG(N=%d)', app.bgN); end
             if app.chirpApplied, parts{end+1} = 'chirp(Sellmeier)'; end
+            if app.solvData && strcmp(app.solvView, 'all')
+                parts{end+1} = 'solvent signal subtracted';
+            elseif app.solvData
+                parts{end+1} = 'solvent coh. subtracted';
+            end
             if isempty(parts), base = 'raw'; else, base = strjoin(parts, ', '); end
             if app.isCropped(), base = [base ', cropped']; end
+            if ~strcmp(app.sigKind, app.sigOrigKind)
+                base = [base ', converted'];
+            end
             if nargin > 1 && ~isempty(scaleStr)
-                str = sprintf('2D \\DeltaA or Intensity  (%s, %s scale)', base, scaleStr);
+                str = sprintf('2D %s  (%s, %s scale)', app.sigName(), base, scaleStr);
             else
-                str = sprintf('2D \\DeltaA or Intensity  (%s)', base);
+                str = sprintf('2D %s  (%s)', app.sigName(), base);
             end
         end
         
@@ -7787,6 +11513,12 @@ classdef TRSpecAnalyzer < handle
                             cl = max(vals, [], 'omitnan');
                         end
                     end
+                    % Anisotropy r: values beyond +-0.5 only occur where
+                    % the sum of the two signals crosses zero; they
+                    % would take the contrast from the rest of the map.
+                    if app.aniOn && strcmp(app.aniView, 'r')
+                        cl = min(cl, 0.5);
+                    end
                     if isempty(cl) || cl == 0 || isnan(cl), cl = 1; end
                     cMin = -cl;  cMax = cl;
                 end
@@ -7862,6 +11594,16 @@ classdef TRSpecAnalyzer < handle
                 'wavelength', 'delay', 'deltaA', 'deltaA_raw', ...
                 'originalWavelength', 'originalDelay', ...
                 'originalDeltaA', 'dataSourceDesc', ...
+                'sigKind', 'sigOrigKind', 'sigAUnit', ...
+                'refOrig', 'refDesc', 'subApplied', 'subScale', ...
+                'subShift', 'subBaked', 'baseRebased', ...
+                'corrLog', 'corrLogOK', ...
+                'aniOn', 'perpOrig', 'perpDesc', 'aniView', 'aniG', ...
+                'aniTail', 'aniTailT', 'aniThr', 'aniShift', ...
+                'solvOn', 'solvA', 'solvShift', 'solvBand', ...
+                'solvBandUnit', 'solvWL', 'solvMaxShift', ...
+                'solvData', 'solvDataA', 'solvDataShift', ...
+                'solvDataWin', 'solvDataPad', 'solvView', 'solvStore', ...
                 ... % corrections
                 'bgApplied', 'bgSpectrum', 'bgN', ...
                 'chirpApplied', 'chirpPts', 'chirpParams', ...
@@ -7879,6 +11621,7 @@ classdef TRSpecAnalyzer < handle
                 'kfBetaInit', 'kfBetaFixed', 'kfStretchOn', ...
                 'kfHasInf', 'kfT0', 'kfT0Fixed', ...
                 'kfFWHM', 'kfFWHMFixed', 'kfIRFTreat', 'kfFitTMin', 'kfFitTMax', ...
+                'kfBandOn', 'kfBandTo', 'kfBandMode', ...
                 ... % global analysis settings + results
                 'gaNComp', 'gaTauInit', 'gaTauFixed', ...
                 'gaBetaInit', 'gaStretchOn', 'gaIRFTreat', 'gaSeqModel', ...
@@ -7891,7 +11634,67 @@ classdef TRSpecAnalyzer < handle
                 'gaResultStretchOn', 'gaResultIRF', 'gaResultTRange', ...
                 ... % persisted child-window analysis results
                 'cohSaved', 'ldaSaved', 'mcrSaved', 'svdSaved', ...
-                'kfSaved', 'tfSaved', 'tgSet', 'tgSaved', 'autoSaved'};
+                'kfSaved', 'tfSaved', 'tgSet', 'tgSaved', 'autoSaved', ...
+                'bpSaved', ...
+                ... % analysis state of the anisotropy views not shown
+                'aniStore'};
+        end
+        
+        function names = analysisFields(~)
+            %ANALYSISFIELDS  The properties that hold the setup and the
+            %   results of the analysis windows (all are session fields).
+            %   With two polarizations this set exists once per view:
+            %   for the view shown in the properties themselves, for the
+            %   others in aniStore.
+            names = { ...
+                'kfNComp', 'kfTauInit', 'kfTauFixed', ...
+                'kfBetaInit', 'kfBetaFixed', 'kfStretchOn', ...
+                'kfHasInf', 'kfT0', 'kfT0Fixed', ...
+                'kfFWHM', 'kfFWHMFixed', 'kfIRFTreat', 'kfFitTMin', 'kfFitTMax', ...
+                'kfBandOn', 'kfBandTo', 'kfBandMode', ...
+                'gaNComp', 'gaTauInit', 'gaTauFixed', ...
+                'gaBetaInit', 'gaStretchOn', 'gaIRFTreat', 'gaSeqModel', ...
+                'gaHasInf', 'gaT0', 'gaT0Fixed', ...
+                'gaFWHM', 'gaFWHMFixed', 'gaCA', 'gaResultCA', ...
+                'gaResultTau', 'gaResultBeta', 'gaResultT0', ...
+                'gaResultFWHM', 'gaResultHasInf', 'gaResultDADS', ...
+                'gaResultEADS', 'gaResultFit', 'gaResultRMS', ...
+                'gaResultTauStd', 'gaFitTMin', 'gaFitTMax', ...
+                'gaResultStretchOn', 'gaResultIRF', 'gaResultTRange', ...
+                'cohSaved', 'ldaSaved', 'mcrSaved', 'svdSaved', ...
+                'kfSaved', 'tfSaved', 'tgSet', 'tgSaved', 'autoSaved', ...
+                'bpSaved'};
+        end
+        
+        function S = takeAnalysisState(app)
+            %TAKEANALYSISSTATE  Setup and results of the analysis windows
+            %   as one struct (a copy).
+            names = app.analysisFields();
+            S = struct();
+            for k = 1:numel(names)
+                S.(names{k}) = app.(names{k});
+            end
+        end
+        
+        function putAnalysisState(app, S)
+            %PUTANALYSISSTATE  Make a struct of takeAnalysisState the
+            %   setup and the results in force.
+            names = app.analysisFields();
+            for k = 1:numel(names)
+                if isfield(S, names{k})
+                    app.(names{k}) = S.(names{k});
+                end
+            end
+        end
+        
+        function dropViewResults(app, views)
+            %DROPVIEWRESULTS  Forget what is kept for the named views (the
+            %   data of these views have changed).
+            for k = 1:numel(views)
+                if isfield(app.aniStore, views{k})
+                    app.aniStore = rmfield(app.aniStore, views{k});
+                end
+            end
         end
         
         function saveSession(app)
@@ -7936,7 +11739,7 @@ classdef TRSpecAnalyzer < handle
             L = {app.bgFig, app.chirpFig, app.cropFig, app.loadFig, ...
                  app.gaFig, app.maskFig, app.kinFitFig, app.svdFig, ...
                  app.ldaFig, app.mcrFig, app.coherenceFig, app.tfFig, ...
-                 app.targetFig, app.autoFig};
+                 app.targetFig, app.autoFig, app.bandFig};
         end
         
         function closeAnalysisWindows(app)
@@ -7949,7 +11752,7 @@ classdef TRSpecAnalyzer < handle
             % corrections it takes itself off this list.)
             L = {app.tfFig, app.coherenceFig, app.gaFig, app.kinFitFig, ...
                  app.svdFig, app.ldaFig, app.mcrFig, app.targetFig, ...
-                 app.autoFig};
+                 app.autoFig, app.bandFig};
             for kk = 1:numel(L)
                 cf = L{kk};
                 if ~isempty(cf) && isvalid(cf)
@@ -8103,6 +11906,20 @@ classdef TRSpecAnalyzer < handle
                     app.specUnit = p.specUnit;
                 end
             catch, end
+            try
+                if isfield(p, 'sigLoadKind') && ischar(p.sigLoadKind) && ...
+                        any(strcmp(p.sigLoadKind, {'dA', 'dTT', 'int'}))
+                    app.sigLoadKind = p.sigLoadKind;
+                    app.sigOrigKind = p.sigLoadKind;   % no data yet
+                    app.sigKind     = p.sigLoadKind;
+                end
+            catch, end
+            try
+                if isfield(p, 'sigAUnit') && ischar(p.sigAUnit) && ...
+                        any(strcmp(p.sigAUnit, {'OD', 'mOD'}))
+                    app.sigAUnit = p.sigAUnit;
+                end
+            catch, end
         end
         
         function savePrefs(app)
@@ -8115,9 +11932,11 @@ classdef TRSpecAnalyzer < handle
                 delayScaleMode = app.delayScaleMode;     %#ok<NASGU>
                 splitThreshold = app.splitThreshold;     %#ok<NASGU>
                 specUnit       = app.specUnit;           %#ok<NASGU>
+                sigLoadKind    = app.sigLoadKind;        %#ok<NASGU>
+                sigAUnit       = app.sigAUnit;           %#ok<NASGU>
                 save(app.prefsFile(), 'lastDir', 'timeUnit', ...
                     'mapColormap', 'delayScaleMode', 'splitThreshold', ...
-                    'specUnit');
+                    'specUnit', 'sigLoadKind', 'sigAUnit');
             catch
             end
         end
@@ -8221,9 +12040,21 @@ classdef TRSpecAnalyzer < handle
             % Drop all persisted analysis results. Called whenever the
             % underlying dataset changes shape or content in a way that
             % makes previous results meaningless (new file load, crop,
-            % reset-all). Includes the GA results: gaResultDADS /
-            % gaResultFit are sized to the wavelength / delay axes and
-            % would otherwise crash plotDADS on the next window open.
+            % reset-all). Those kept for the anisotropy views that are
+            % not shown go as well, unless the change is one that leaves
+            % the data of other views alone (see applyAnisotropy).
+            app.clearLiveResults();
+            if ~app.aniKeepStore
+                app.aniStore = struct();
+            end
+            app.solvStore = struct();
+        end
+        
+        function clearLiveResults(app)
+            % Drop the analysis results of the data shown. Includes the
+            % GA results: gaResultDADS / gaResultFit are sized to the
+            % wavelength / delay axes and would otherwise crash plotDADS
+            % on the next window open.
             app.clearGaResults();
             app.cohSaved = [];
             app.ldaSaved = [];
@@ -8232,6 +12063,7 @@ classdef TRSpecAnalyzer < handle
             app.tfSaved  = [];
             app.tgSaved  = [];
             app.autoSaved = [];
+            app.bpSaved  = [];
             % tgSet (scheme and starting values) is a setting: kept.
             % svdSaved holds only view settings (N, nShow, scale),
             % which remain sensible across datasets -- keep it.
@@ -8264,6 +12096,9 @@ classdef TRSpecAnalyzer < handle
             % without those fields does not inherit stale ones.
             app.closeChildWindows();
             app.invalidateChildResults();
+            app.clearReference();
+            app.clearAnisotropy();
+            app.corrLog = {};  app.corrLogOK = true;  app.pendingAuto = [];
             flds = app.sessionFields();
             for k = 1:numel(flds)
                 if isfield(s, flds{k})
@@ -8284,6 +12119,100 @@ classdef TRSpecAnalyzer < handle
             if ~isfield(s, 'gaSeqModel') || ...
                     ~any(strcmp(app.gaSeqModel, {'age', 't0'}))
                 app.gaSeqModel = 'age';
+            end
+            if ~isfield(s, 'baseRebased')
+                app.baseRebased = ~isequaln(app.deltaA_raw, app.originalDeltaA);
+            end
+            if ~isfield(s, 'corrLog')
+                % older session: how the starting data came about is
+                % not recorded
+                app.corrLog = {};
+                app.corrLogOK = ~app.baseRebased;
+            end
+            if ~iscell(app.corrLog), app.corrLog = {}; end
+            app.updateRefStage();
+            if ~ischar(app.aniView) || ...
+                    ~any(strcmp(app.aniView, {'par', 'perp', 'magic', 'r'}))
+                app.aniView = 'r';
+            end
+            app.aniOn = logical(app.aniOn) && ~isempty(app.perpOrig);
+            if ~(isnumeric(app.aniShift) && isscalar(app.aniShift) && ...
+                    isfinite(app.aniShift))
+                app.aniShift = 0;
+            end
+            app.aniShift = double(app.aniShift);
+            % what is kept for the views that are not shown
+            st = struct();
+            if isstruct(app.aniStore) && isscalar(app.aniStore) && app.aniOn
+                vw = {'par', 'perp', 'magic', 'r'};
+                for k = 1:numel(vw)
+                    if ~strcmp(vw{k}, app.aniView) && ...
+                            isfield(app.aniStore, vw{k}) && ...
+                            isstruct(app.aniStore.(vw{k})) && ...
+                            isscalar(app.aniStore.(vw{k}))
+                        st.(vw{k}) = app.aniStore.(vw{k});
+                    end
+                end
+            end
+            app.aniStore = st;
+            app.updatePerpStage();
+            okWin = isnumeric(app.solvDataWin) && numel(app.solvDataWin) == 2 ...
+                && all(isfinite(app.solvDataWin));
+            if ~okWin, app.solvDataWin = [NaN NaN]; end
+            % The solvent views. (The first candidates of version 1.1.0
+            % stored "the coherence is out of the data" without a view,
+            % with the factor of the analysis set to 0.)
+            if ~isfield(s, 'solvView') && isscalar(app.solvData) && ...
+                    logical(app.solvData)
+                app.solvView = 'osc';  app.solvOn = true;
+                app.solvA = app.solvDataA;  app.solvShift = app.solvDataShift;
+            end
+            if ~ischar(app.solvView) || ...
+                    ~any(strcmp(app.solvView, {'data', 'osc', 'all'}))
+                app.solvView = 'data';
+            end
+            app.solvOn = isscalar(app.solvOn) && logical(app.solvOn) && ...
+                ~isempty(app.refOrig) && ~app.aniOn;
+            if ~(app.solvOn && okWin), app.solvView = 'data'; end
+            app.solvData = ~strcmp(app.solvView, 'data');
+            % what is kept for the solvent views that are not shown
+            st = struct();
+            if isstruct(app.solvStore) && isscalar(app.solvStore) && ...
+                    app.solvOn && okWin
+                vw = {'data', 'osc', 'all'};
+                for k = 1:numel(vw)
+                    if ~strcmp(vw{k}, app.solvView) && ...
+                            isfield(app.solvStore, vw{k}) && ...
+                            isstruct(app.solvStore.(vw{k})) && ...
+                            isscalar(app.solvStore.(vw{k}))
+                        st.(vw{k}) = app.solvStore.(vw{k});
+                    end
+                end
+            end
+            app.solvStore = st;
+            if ~isnumeric(app.solvBand) || numel(app.solvBand) ~= 2
+                app.solvBand = [NaN NaN];
+            end
+            if ~isnumeric(app.solvWL) || numel(app.solvWL) ~= 2
+                app.solvWL = [NaN NaN];
+            end
+            if ~ischar(app.solvBandUnit) || ...
+                    ~any(strcmp(app.solvBandUnit, {'cm-1', 'thz'}))
+                app.solvBandUnit = 'cm-1';
+            end
+            % Sessions written before version 1.1.0 have no signal kind:
+            % their data are what the file held, taken as dA.
+            if ~isfield(s, 'sigKind') || ~ischar(app.sigKind) || ...
+                    ~any(strcmp(app.sigKind, {'dA', 'dTT', 'int'}))
+                app.sigKind = 'dA';
+            end
+            if ~isfield(s, 'sigOrigKind') || ~ischar(app.sigOrigKind) || ...
+                    ~any(strcmp(app.sigOrigKind, {'dA', 'dTT', 'int'}))
+                app.sigOrigKind = 'dA';
+            end
+            if ~ischar(app.sigAUnit) || ...
+                    ~any(strcmp(app.sigAUnit, {'OD', 'mOD'}))
+                app.sigAUnit = 'OD';
             end
             
             % --- Sync toolbar controls to restored state ---
@@ -8339,6 +12268,8 @@ classdef TRSpecAnalyzer < handle
                 app.buildKinAxes();
                 app.updateStatusLabel();
                 app.updateAll();
+                % (the G of a tail matching is known only now)
+                app.updateSignalLabel();
             catch ME
                 app.holdDataChange = false;
                 rethrow(ME);
@@ -8356,9 +12287,21 @@ classdef TRSpecAnalyzer < handle
             
             % Build suggestion filename reflecting current pipeline state
             parts = {};
+            if app.subApplied,   parts{end+1} = 'sub';                       end
             if app.bgApplied,    parts{end+1} = sprintf('BG%d', app.bgN);     end
             if app.chirpApplied, parts{end+1} = 'chirp';                     end
+            if app.solvData && strcmp(app.solvView, 'all')
+                parts{end+1} = 'solvsig';
+            elseif app.solvData
+                parts{end+1} = 'solvcoh';
+            end
             if app.isCropped(),  parts{end+1} = 'cropped';                   end
+            if ~strcmp(app.sigKind, app.sigOrigKind)
+                parts{end+1} = app.sigKind;      % 'dTT' or 'dA'
+            end
+            if app.aniOn
+                parts{end+1} = app.aniView;      % 'par' 'perp' 'magic' 'r'
+            end
             if isempty(parts),   suffix = 'raw'; else, suffix = strjoin(parts, '_'); end
             
             nameOnly = app.dataStem();
@@ -8449,6 +12392,14 @@ classdef TRSpecAnalyzer < handle
             app.wavelength = app.originalWavelength;
             app.delay      = app.originalDelay;
             app.deltaA_raw = app.originalDeltaA;
+            app.sigKind    = app.sigOrigKind;
+            app.subApplied = false;  app.subBaked = false;
+            app.baseRebased = false;
+            app.solvData = false;  app.solvView = 'data';
+            app.solvStore = struct();
+            app.corrLog = {};  app.corrLogOK = true;  app.pendingAuto = [];
+            app.updateRefStage();
+            app.updatePerpStage();
             
             % --- Clear all correction state ---
             app.bgApplied    = false;  app.bgSpectrum = [];  app.bgN = 0;
@@ -8518,6 +12469,7 @@ classdef TRSpecAnalyzer < handle
             app.tZeroShift = app.tZeroShift + delta;
             % Things that live on the delay axis move with it.
             app.specOverlays = app.specOverlays - delta;
+            app.solvDataWin  = app.solvDataWin - delta;
             if ~isempty(app.gaFitTMin), app.gaFitTMin = app.gaFitTMin - delta; end
             if ~isempty(app.gaFitTMax), app.gaFitTMax = app.gaFitTMax - delta; end
             if ~isempty(app.kfFitTMin), app.kfFitTMin = app.kfFitTMin - delta; end
@@ -8834,6 +12786,1440 @@ classdef TRSpecAnalyzer < handle
         % =================================================================
         % Single-trace kinetic fit (one wavelength at a time)
         % =================================================================
+        % =================================================================
+        % Position of a band along the delays (Band position window)
+        % =================================================================
+        function [p, rss, nIter] = lmFit(~, resFun, p0, maxIter)
+            %LMFIT  Least squares by the Levenberg-Marquardt method: the
+            %   parameters p that make sum(resFun(p) .^ 2) smallest,
+            %   started at p0. The Jacobian is taken by central
+            %   differences (step 1e-6 of the parameter, at least 1e-9).
+            %   A step is taken when it lowers the sum of squares; the
+            %   damping is divided by 10 after a step taken and
+            %   multiplied by 10 after one refused. The search ends when
+            %   no step up to a damping of 1e12 lowers the sum of
+            %   squares, when a step lowers it by less than 1e-12 of its
+            %   value, or after maxIter steps (60 if not given).
+            if nargin < 4, maxIter = 60; end
+            p = p0(:);
+            m = numel(p);
+            r = resFun(p);  r = r(:);
+            rss = r.' * r;
+            nIter = 0;
+            if m == 0 || ~isfinite(rss), return; end
+            lam = 1e-3;
+            for it = 1:maxIter
+                nIter = it;
+                J = zeros(numel(r), m);
+                for j = 1:m
+                    h = 1e-6 * max(abs(p(j)), 1e-3);
+                    pp = p;  pp(j) = p(j) + h;
+                    pm = p;  pm(j) = p(j) - h;
+                    rp = resFun(pp);  rm = resFun(pm);
+                    J(:, j) = (rp(:) - rm(:)) / (2 * h);
+                end
+                if ~all(isfinite(J(:))), break; end
+                A = J.' * J;
+                g = J.' * r;
+                dA = diag(A);
+                ridge = 1e-12 * sum(dA) / m + 1e-300;
+                taken = false;  rel = 0;
+                while lam <= 1e12
+                    dp = -((A + lam * diag(dA) + ridge * eye(m)) \ g);
+                    pn = p + dp;
+                    rn = resFun(pn);  rn = rn(:);
+                    rssn = rn.' * rn;
+                    if isfinite(rssn) && rssn < rss
+                        rel = (rss - rssn) / rss;
+                        p = pn;  r = rn;  rss = rssn;
+                        lam = max(lam / 10, 1e-10);
+                        taken = true;
+                        break;
+                    end
+                    lam = lam * 10;
+                end
+                if ~taken || rel < 1e-12, break; end
+            end
+        end
+        
+        function L = lognormShape(~, v, vp, width, gam)
+            %LOGNORMSHAPE  Log-normal band of height 1 with its maximum at
+            %   vp:  exp(-ln2 (ln(1 + a) / gam)^2),
+            %   a = 2 gam (v - vp) / width, and 0 where a <= -1.
+            %   gam is the asymmetry (negative: tail to smaller v; 0: a
+            %   Gaussian of FWHM width; kept within +-0.95). The full
+            %   width at half maximum is width sinh(gam) / gam.
+            g = min(max(gam, -0.95), 0.95);
+            u = 2 * (v - vp) / width;
+            if abs(g) < 1e-9
+                L = exp(-log(2) * u .^ 2);
+                return;
+            end
+            a = g * u;
+            L = zeros(size(v));
+            ok = a > -1;
+            L(ok) = exp(-log(2) * (log1p(a(ok)) / g) .^ 2);
+        end
+        
+        function [v, jac] = bandAxis(~, x, specUnit, posUnit)
+            %BANDAXIS  The axis along which the position of a band is
+            %   given, and the factor that turns a signal per unit of the
+            %   spectral axis into one per unit of that axis.
+            %   x: values of the spectral axis ('nm' or 'cm-1' =
+            %   specUnit). posUnit the same: v = x, factor 1. The other
+            %   one: v = 1e7 / x and the factor x^2 / 1e7, since
+            %   |dx/dv| = x^2 / 1e7.
+            x = x(:);
+            if strcmp(posUnit, specUnit)
+                v = x;  jac = ones(size(x));
+            else
+                v = 1e7 ./ x;  jac = x .^ 2 / 1e7;
+            end
+        end
+        
+        function w = bandHalfWidth(~, v, y, m, h)
+            %BANDHALFWIDTH  Full width at half maximum of the curve y(v)
+            %   around its point m, for the height h: the two places
+            %   where y falls to h / 2, by linear interpolation between
+            %   the points. NaN when the curve does not fall that far on
+            %   one side, or does not reach h / 2 at the point m.
+            n = numel(v);
+            w = NaN;
+            half = 0.5 * h;
+            if ~(y(m) >= half), return; end
+            i = m;
+            while i >= 1 && y(i) >= half, i = i - 1; end
+            if i < 1, return; end
+            vLo = v(i) + (half - y(i)) * (v(i + 1) - v(i)) / (y(i + 1) - y(i));
+            k = m;
+            while k <= n && y(k) >= half, k = k + 1; end
+            if k > n, return; end
+            vHi = v(k - 1) + (half - y(k - 1)) * (v(k) - v(k - 1)) / ...
+                (y(k) - y(k - 1));
+            w = vHi - vLo;
+        end
+        
+        function [pos, hgt, i1, i2, coef] = bandParabola(~, v, y, frac)
+            %BANDPARABOLA  Maximum of the curve y(v) from a parabola
+            %   through its top: the points around the largest one whose
+            %   value is at least frac times that value (at least three
+            %   points: the largest and its neighbors), fitted by least
+            %   squares. The points used are i1 ... i2 (i2 < i1: none).
+            %   coef = [a; b; c; v(m); s]: the parabola is
+            %   a u^2 + b u + c with u = (v - v(m)) / s, m the largest
+            %   point, s = v(i2) - v(i1). pos and hgt are NaN when the
+            %   parabola has no maximum between the first and the last
+            %   point used (a curvature of less than 1e-9 of the largest
+            %   value counts as none: a flat top).
+            v = v(:);  y = y(:);
+            n = numel(v);
+            pos = NaN;  hgt = NaN;  i1 = 1;  i2 = 0;  coef = NaN(5, 1);
+            if n < 3 || ~all(isfinite(y)), return; end
+            [ym, m] = max(y);
+            if ~(ym > 0), return; end
+            lim = frac * ym;
+            i1 = m;
+            while i1 > 1 && y(i1 - 1) >= lim, i1 = i1 - 1; end
+            i2 = m;
+            while i2 < n && y(i2 + 1) >= lim, i2 = i2 + 1; end
+            if i2 - i1 + 1 < 3
+                i1 = max(m - 1, 1);  i2 = min(m + 1, n);
+                if i2 - i1 + 1 < 3
+                    i1 = 1;  i2 = 0;
+                    return;
+                end
+            end
+            s = v(i2) - v(i1);
+            u = (v(i1:i2) - v(m)) / s;
+            c = [u .^ 2, u, ones(numel(u), 1)] \ y(i1:i2);
+            coef = [c(1); c(2); c(3); v(m); s];
+            if ~(c(1) < -1e-9 * ym), return; end
+            p0 = v(m) + s * (-c(2) / (2 * c(1)));
+            if p0 < v(i1) || p0 > v(i2), return; end
+            pos = p0;
+            hgt = c(3) - c(2) ^ 2 / (4 * c(1));
+        end
+        
+        function [r, hh] = lognormRes(app, v, y, q)
+            %LOGNORMRES  Residual of a log-normal band fitted to y(v):
+            %   maximum at q(1), width exp(q(2)), asymmetry q(3); its
+            %   height hh follows by linear least squares.
+            shape = app.lognormShape(v, q(1), exp(q(2)), q(3));
+            den = shape.' * shape;
+            hh = 0;
+            if den > 0, hh = (shape.' * y) / den; end
+            r = y - hh * shape;
+        end
+        
+        function R = bandPosition(app, v, Y, method, frac, minRel)
+            %BANDPOSITION  Position of a band in every column (delay) of Y.
+            %   v       values of the position axis, increasing
+            %   Y       signal, numel(v) x delays, the band positive. A
+            %           delay with an empty value (NaN) gives no position
+            %   method  'moment'     first moment, int v y dv / int y dv
+            %                        (trapezoid)
+            %           'parabola'   maximum of a parabola through the
+            %                        top points (bandParabola, with frac)
+            %           'lognormal'  maximum of a log-normal band fitted
+            %                        to the whole range (height,
+            %                        position, width, asymmetry)
+            %   minRel  a delay counts only when the largest value of its
+            %           column is above 0 and at least minRel times the
+            %           largest size (absolute value) of the signal in
+            %           all columns
+            %   R, one value per delay (NaN where there is none):
+            %   pos     the position
+            %   height  height of the band: largest value ('moment'), top
+            %           of the parabola, or fitted height
+            %   width   full width at half maximum: 2.3548 x the standard
+            %           deviation of the band about pos ('moment'), from
+            %           the two half-height points of the data
+            %           ('parabola'), or of the fitted band
+            %   area    integral of the signal over the range
+            %           ('lognormal': of the fitted band over the whole
+            %           axis)
+            %   asym    asymmetry of the fitted band ('lognormal' only)
+            %   rms     RMS difference between data and fitted band
+            %           ('lognormal')
+            %   ok      the delay counted
+            %   par     numbers that draw the model of a delay
+            %           (bandModelCurve)
+            v = v(:);
+            [n, nt] = size(Y);
+            R = struct('pos', NaN(1, nt), 'height', NaN(1, nt), ...
+                'width', NaN(1, nt), 'area', NaN(1, nt), ...
+                'asym', NaN(1, nt), 'rms', NaN(1, nt), ...
+                'ok', false(1, nt), 'par', NaN(5, nt), 'method', method);
+            if n < 3 || nt == 0, return; end
+            full = all(isfinite(Y), 1);
+            top = -Inf(1, nt);
+            top(full) = max(Y(:, full), [], 1);
+            if ~any(full) || ~(max(top) > 0), return; end
+            R.ok = full & top >= minRel * max(max(abs(Y(:, full)))) & top > 0;
+            dv = diff(v);
+            % (the log-normal fit: a width or an asymmetry that the data
+            % of a delay hardly determine makes the step matrix nearly
+            % singular; MATLAB would say so at every step)
+            ws = warning;
+            restoreWarn = onCleanup(@() warning(ws)); %#ok<NASGU>
+            warning('off', 'MATLAB:nearlySingularMatrix');
+            warning('off', 'MATLAB:singularMatrix');
+            for j = find(R.ok)
+                y = Y(:, j);
+                [~, m] = max(y);
+                area = sum(dv .* (y(1:end-1) + y(2:end))) / 2;
+                switch method
+                    case 'moment'
+                        if ~(area > 0), continue; end
+                        pos = sum(dv .* (v(1:end-1) .* y(1:end-1) + ...
+                            v(2:end) .* y(2:end))) / 2 / area;
+                        d2 = (v - pos) .^ 2 .* y;
+                        vr = sum(dv .* (d2(1:end-1) + d2(2:end))) / 2 / area;
+                        R.pos(j) = pos;
+                        R.height(j) = y(m);
+                        R.area(j) = area;
+                        if vr > 0
+                            R.width(j) = 2 * sqrt(2 * log(2)) * sqrt(vr);
+                        end
+                    case 'parabola'
+                        [pos, hgt, ~, ~, coef] = app.bandParabola(v, y, frac);
+                        R.par(:, j) = coef;
+                        if ~isfinite(pos), continue; end
+                        R.pos(j) = pos;
+                        R.height(j) = hgt;
+                        R.area(j) = area;
+                        R.width(j) = app.bandHalfWidth(v, y, m, hgt);
+                    otherwise
+                        % start: top of the parabola, width of the data
+                        % at half height (else a quarter of the range),
+                        % no asymmetry
+                        [p0, h0] = app.bandParabola(v, y, 0.8);
+                        if ~isfinite(p0), p0 = v(m);  h0 = y(m); end
+                        w0 = app.bandHalfWidth(v, y, m, h0);
+                        if ~(isfinite(w0) && w0 > 0)
+                            w0 = (v(end) - v(1)) / 4;
+                        end
+                        [q, rss] = app.lmFit( ...
+                            @(q) app.lognormRes(v, y, q), [p0; log(w0); 0]);
+                        [~, hh] = app.lognormRes(v, y, q);
+                        wid = exp(q(2));
+                        gam = min(max(q(3), -0.95), 0.95);
+                        if ~(isfinite(rss) && hh > 0 && isfinite(wid) && ...
+                                q(1) >= v(1) && q(1) <= v(end))
+                            continue;
+                        end
+                        R.pos(j) = q(1);
+                        R.height(j) = hh;
+                        R.asym(j) = gam;
+                        if abs(gam) < 1e-9
+                            R.width(j) = wid;
+                        else
+                            R.width(j) = wid * sinh(gam) / gam;
+                        end
+                        R.area(j) = hh * wid * sqrt(pi / (4 * log(2))) * ...
+                            exp(gam ^ 2 / (4 * log(2)));
+                        R.rms(j) = sqrt(rss / n);
+                        R.par(:, j) = [q(1); wid; gam; hh; 0];
+                end
+            end
+            R.ok = R.ok & isfinite(R.pos);
+        end
+        
+        function y = bandModelCurve(app, v, method, par)
+            %BANDMODELCURVE  The model of one delay on the axis values v,
+            %   from the column of R.par (bandPosition) of that delay:
+            %   the parabola ('parabola') or the fitted band
+            %   ('lognormal'). Empty for 'moment'.
+            switch method
+                case 'parabola'
+                    u = (v - par(4)) / par(5);
+                    y = par(1) * u .^ 2 + par(2) * u + par(3);
+                case 'lognormal'
+                    y = par(4) * app.lognormShape(v, par(1), par(2), par(3));
+                otherwise
+                    y = [];
+            end
+        end
+        
+        function tau = bandShiftStart(~, t, y, nExp)
+            %BANDSHIFTSTART  Starting time constants for the fit of a
+            %   position y(t) that runs from its first to its last value:
+            %   the times (counted from the first delay) at which
+            %   k / (nExp + 1) of the change has been made,
+            %   k = 1 ... nExp. The last value is the mean of the last
+            %   three points. Each at least half the first delay step,
+            %   and each at least 1.5 times the one before.
+            t = t(:);  y = y(:);
+            n = numel(t);
+            yEnd = mean(y(max(n - 2, 1):end));
+            tot = yEnd - y(1);
+            step = 1;  span = 1;
+            if n > 1
+                step = t(2) - t(1);
+                span = t(end) - t(1);
+            end
+            tau = zeros(1, nExp);
+            for k = 1:nExp
+                tq = span * k / (nExp + 1);
+                if tot ~= 0
+                    hit = find((y - y(1)) / tot >= k / (nExp + 1), 1);
+                    if ~isempty(hit), tq = t(hit) - t(1); end
+                end
+                tau(k) = max(tq, 0.5 * step);
+                if k > 1, tau(k) = max(tau(k), 1.5 * tau(k - 1)); end
+            end
+        end
+        
+        function B = bandShiftBasis(~, tau, tt)
+            %BANDSHIFTBASIS  exp(-t / tau) for every time constant, and a
+            %   column of ones.
+            B = [exp(-tt(:) ./ tau(:).'), ones(numel(tt), 1)];
+        end
+        
+        function [r, tau, c] = bandShiftRes(app, tf, yf, q, lo, hi)
+            %BANDSHIFTRES  Residual of yf(tf) = sum A exp(-tf / tau) + c
+            %   for the time constants tau = exp(q) (q kept within
+            %   lo ... hi); the amplitudes and the constant (c) follow by
+            %   linear least squares.
+            tau = exp(min(max(q(:).', lo), hi));
+            B = app.bandShiftBasis(tau, tf);
+            c = B \ yf;
+            r = yf - B * c;
+        end
+        
+        function F = fitBandShift(app, t, pos, tRange, nExp, tau0)
+            %FITBANDSHIFT  Fit of the position of a band along the delays:
+            %       pos(t) = vInf + sum_i A_i exp(-t / tau_i)
+            %   in the delays tRange(1) ... tRange(2). The amplitudes are
+            %   those at delay 0, so v0 = vInf + sum(A) is the position
+            %   extrapolated to delay 0. For given time constants the
+            %   amplitudes and vInf follow by linear least squares; the
+            %   time constants are found by lmFit on their logarithms.
+            %
+            %   tau0: starting time constants (nExp values). Empty or
+            %   left out: three starts are tried and the best fit is
+            %   kept: bandShiftStart, and two sets spaced evenly on a
+            %   logarithmic scale between the first delay step and 1/5
+            %   or 1/50 of the range. A later start replaces an earlier
+            %   one only when its sum of squares is lower by more than
+            %   1e-6 of it. The time constants are kept between 1/1000
+            %   of the first delay step and 1000 times the range.
+            %
+            %   F.ok, F.msg     false and a text when no fit was possible
+            %   F.tau, F.A      time constants (increasing), amplitudes
+            %   F.vInf, F.v0    position at long delays, and extrapolated
+            %                   to delay 0
+            %   F.shift         v0 - vInf, the sum of the amplitudes
+            %   F.tauAvg        sum(A tau) / sum(A)
+            %   F.tauStd, F.AStd, F.vInfStd, F.v0Std   standard
+            %                   deviations (Inf: not determined by the
+            %                   data)
+            %   F.rms, F.n      RMS of the residual, delays fitted
+            %   F.mask          the delays fitted
+            %   F.fit           the fitted curve at every delay of t
+            %   F.tauStart      the starting values that led to the result
+            %   F.tauLim        true for a time constant that lies at one
+            %                   of the two limits: not determined
+            t = t(:).';  pos = pos(:).';
+            F = struct('ok', false, 'msg', '', 'tau', zeros(1, 0), ...
+                'A', zeros(1, 0), 'vInf', NaN, 'v0', NaN, 'shift', NaN, ...
+                'tauAvg', NaN, 'tauStd', zeros(1, 0), 'AStd', zeros(1, 0), ...
+                'vInfStd', NaN, 'v0Std', NaN, 'rms', NaN, 'n', 0, ...
+                'mask', false(size(t)), 'fit', NaN(size(t)), ...
+                'tauStart', zeros(1, 0), 'tauLim', false(1, 0));
+            tr = tRange(:).';
+            if numel(tr) < 2 || ~all(isfinite(tr(1:2))) || tr(1) == tr(2)
+                F.msg = 'Give the delay range of the fit.';
+                return;
+            end
+            mask = t >= min(tr(1:2)) & t <= max(tr(1:2)) & isfinite(pos);
+            F.mask = mask;
+            F.n = nnz(mask);
+            if nExp < 1 || F.n < 2 * nExp + 2
+                F.msg = sprintf(['%d positions in the range: too few for ' ...
+                    '%d exponential%s (at least %d).'], F.n, nExp, ...
+                    app.pick(nExp == 1, '', 's'), 2 * nExp + 2);
+                return;
+            end
+            tf = t(mask).';
+            yf = pos(mask).';
+            step = tf(2) - tf(1);
+            span = tf(end) - tf(1);
+            lo = log(1e-3 * step);
+            hi = log(1e3 * span);
+            if nargin >= 6 && ~isempty(tau0)
+                tau0 = tau0(:).';
+                if numel(tau0) ~= nExp || ~all(isfinite(tau0) & tau0 > 0)
+                    F.msg = sprintf(['Give %d starting time constant%s ' ...
+                        'above 0, or leave the field empty.'], nExp, ...
+                        app.pick(nExp == 1, '', 's'));
+                    return;
+                end
+                starts = {tau0};
+            else
+                starts = {app.bandShiftStart(tf, yf, nExp)};
+                dvs = [5 50];
+                for k = 1:2
+                    a = log(step);
+                    b = log(max(span / dvs(k), 2 * step));
+                    if nExp == 1
+                        starts{end+1} = exp(0.5 * (a + b)); %#ok<AGROW>
+                    else
+                        starts{end+1} = exp(linspace(a, b, nExp)); %#ok<AGROW>
+                    end
+                end
+            end
+            % (a time constant far outside the delays makes the columns
+            % of the linear step alike; MATLAB would say so at every step)
+            ws = warning;
+            restoreWarn = onCleanup(@() warning(ws)); %#ok<NASGU>
+            warning('off', 'MATLAB:rankDeficientMatrix');
+            warning('off', 'MATLAB:nearlySingularMatrix');
+            warning('off', 'MATLAB:singularMatrix');
+            best = [];  bestRss = Inf;  bestStart = [];
+            for k = 1:numel(starts)
+                [q, rss] = app.lmFit( ...
+                    @(q) app.bandShiftRes(tf, yf, q, lo, hi), ...
+                    log(starts{k}(:)));
+                if isfinite(rss) && (isempty(best) || ...
+                        rss < bestRss * (1 - 1e-6))
+                    best = q;  bestRss = rss;  bestStart = starts{k};
+                end
+            end
+            if isempty(best)
+                F.msg = 'The fit of the position failed.';
+                return;
+            end
+            [~, tau, c] = app.bandShiftRes(tf, yf, best, lo, hi);
+            rss = bestRss;
+            [tau, order] = sort(tau(:).');
+            amp = c(1:nExp).';
+            amp = amp(order);
+            vInf = c(nExp + 1);
+            F.tau = tau;
+            F.tauLim = tau >= exp(hi) * (1 - 1e-6) | tau <= exp(lo) * (1 + 1e-6);
+            F.A = amp;
+            F.vInf = vInf;
+            F.shift = sum(amp);
+            F.v0 = vInf + F.shift;
+            if F.shift ~= 0
+                F.tauAvg = sum(amp .* tau) / F.shift;
+            end
+            F.rms = sqrt(rss / F.n);
+            F.fit = (app.bandShiftBasis(tau, t) * [amp(:); vInf]).';
+            F.tauStart = sort(bestStart(:).');
+            % standard deviations: all parameters free; for v0 the last
+            % amplitude is written as v0 - vInf - (the other amplitudes)
+            sig = app.fitParamUncertainty( ...
+                @(p) yf - app.bandShiftBasis(p(1:nExp), tf) * p(nExp+1:end), ...
+                [tau(:); amp(:); vInf], rss, F.n);
+            F.tauStd = sig(1:nExp).';
+            F.AStd = sig(nExp+1:2*nExp).';
+            F.vInfStd = sig(2 * nExp + 1);
+            sg0 = app.fitParamUncertainty( ...
+                @(p) yf - app.bandShiftBasis(p(1:nExp), tf) * ...
+                    [p(nExp+1:2*nExp-1); ...
+                     p(2*nExp) - p(2*nExp+1) - sum(p(nExp+1:2*nExp-1)); ...
+                     p(2*nExp+1)], ...
+                [tau(:); reshape(amp(1:end-1), [], 1); F.v0; vInf], rss, F.n);
+            F.v0Std = sg0(2 * nExp);
+            F.ok = true;
+        end
+        
+        function s = bandMethodName(~, method)
+            %BANDMETHODNAME  The method of the band position in words.
+            switch method
+                case 'parabola'
+                    s = 'maximum of a parabola through the top';
+                case 'lognormal'
+                    s = 'maximum of a fitted log-normal band';
+                otherwise
+                    s = 'first moment';
+            end
+        end
+        
+        function S = bandSetupDefault(app)
+            %BANDSETUPDEFAULT  Setup of the Band position window for the
+            %   data shown: the whole spectral axis as the band, taken as
+            %   positive or negative after the value of largest size in
+            %   the data; position in cm-1 by the first moment; for
+            %   intensity data on a wavelength axis the signal is
+            %   converted to one per wavenumber; fit of the position from
+            %   delay 0 (the first delay, if there is no delay 0) to the
+            %   last delay with 2 exponentials.
+            x = app.wavelength(:);
+            t = app.delay(:).';
+            D = app.deltaA;
+            sgn = 'pos';
+            if any(isfinite(D(:)))
+                [~, k] = max(abs(D(:)));
+                if D(k) < 0, sgn = 'neg'; end
+            end
+            tFrom = t(1);
+            if t(1) <= 0 && t(end) >= 0, tFrom = 0; end
+            tSpec = t(1);
+            if ~isempty(app.selT) && isfinite(app.selT), tSpec = app.selT; end
+            S = struct('x1', min(x), 'x2', max(x), 'sign', sgn, ...
+                'posUnit', 'cm-1', ...
+                'density', strcmp(app.sigKind, 'int') && ...
+                    ~strcmp(app.specUnit, 'cm-1'), ...
+                'method', 'moment', 'frac', 0.8, 'minPct', 5, ...
+                'tFrom', tFrom, 'tTo', t(end), 'nExp', 2, ...
+                'tauStart', [], 'tSpec', tSpec, 'logT', true);
+        end
+        
+        function [v, Y, info] = bandSpectra(app, S)
+            %BANDSPECTRA  The band of the setup S on the axis its position
+            %   is given on. v increasing; Y (numel(v) x delays) the
+            %   signal with the band positive, converted to a signal per
+            %   unit of v when S asks for it. Wavelengths without data
+            %   at any delay (masked) are left out. info: n
+            %   (wavelengths), nSkip (left out), lo, hi (their range on
+            %   the spectral axis), err (a text when there is no band).
+            x = app.wavelength(:);
+            D = app.deltaA;
+            v = [];  Y = [];
+            info = struct('n', 0, 'nSkip', 0, 'lo', NaN, 'hi', NaN, 'err', '');
+            if ~(isfinite(S.x1) && isfinite(S.x2))
+                info.err = 'Enter both ends of the band.';
+                return;
+            end
+            rows = x >= min(S.x1, S.x2) & x <= max(S.x1, S.x2);
+            keep = rows & any(isfinite(D), 2);
+            info.nSkip = nnz(rows & ~keep);
+            info.n = nnz(keep);
+            if info.n < 3
+                info.err = sprintf(['The band holds %d wavelength%s with ' ...
+                    'data; at least 3 are needed.'], info.n, ...
+                    app.pick(info.n == 1, '', 's'));
+                return;
+            end
+            xr = x(keep);
+            info.lo = min(xr);
+            info.hi = max(xr);
+            other = ~strcmp(S.posUnit, app.specUnit);
+            if other && any(xr <= 0)
+                info.err = sprintf(['The spectral axis has values that ' ...
+                    'are not above 0: it cannot be converted to %s.'], ...
+                    S.posUnit);
+                return;
+            end
+            [v, jac] = app.bandAxis(xr, app.specUnit, S.posUnit);
+            Y = D(keep, :);
+            if other && S.density
+                Y = Y .* jac;
+            end
+            if strcmp(S.sign, 'neg'), Y = -Y; end
+            [v, k] = sort(v);
+            Y = Y(k, :);
+        end
+        
+        function [T, info] = bandTrack(app, S)
+            %BANDTRACK  Position of the band of the setup S at every delay
+            %   (bandPosition). T is empty when there is no band
+            %   (info.err). T.v: the position axis.
+            T = [];
+            [v, Y, info] = app.bandSpectra(S);
+            if ~isempty(info.err), return; end
+            T = app.bandPosition(v, Y, S.method, S.frac, S.minPct / 100);
+            T.v = v;
+        end
+        
+        function s = pmText(~, x, sd, unit)
+            %PMTEXT  'value +/- standard deviation unit', both with the
+            %   decimals that show two digits of the standard deviation
+            %   (more than 12 decimals: six digits of the value, two of
+            %   the standard deviation). Without a usable standard
+            %   deviation: the value with six digits, marked when the
+            %   standard deviation is infinite (not determined by the
+            %   data).
+            if isfinite(sd) && sd > 0 && 1 - floor(log10(sd)) > 12
+                s = sprintf('%.6g +/- %.2g %s', x, sd, unit);
+            elseif isfinite(sd) && sd > 0
+                nd = max(1 - floor(log10(sd)), 0);
+                fmt = sprintf('%%.%df', nd);
+                s = [sprintf(fmt, x), ' +/- ', sprintf(fmt, sd), ' ', unit];
+            elseif isinf(sd)
+                s = sprintf('%.6g %s  [not determined by the data]', x, unit);
+            else
+                s = sprintf('%.6g %s', x, unit);
+            end
+        end
+        
+        function L = bandShiftLines(app, S, T, info, F)
+            %BANDSHIFTLINES  Result text of the Band position window: the
+            %   band, how its position was taken, and the fit F of the
+            %   position (empty: no fit was made).
+            u = app.tUnitTxt();
+            pu = S.posUnit;
+            left = '';
+            if info.nSkip > 0
+                left = sprintf(' (%d without data left out)', info.nSkip);
+            end
+            L = {sprintf('Band: %.6g ... %.6g %s, %d wavelengths%s, taken as %s', ...
+                info.lo, info.hi, app.xUnitTxt(), info.n, left, ...
+                app.pick(strcmp(S.sign, 'neg'), 'negative', 'positive'))};
+            how = sprintf('Position: %s, in %s', ...
+                app.bandMethodName(S.method), pu);
+            if strcmp(S.method, 'parabola')
+                how = sprintf('%s (points from %.3g of the maximum)', ...
+                    how, S.frac);
+            end
+            L{end+1} = how;
+            if ~strcmp(pu, app.specUnit)
+                if S.density
+                    L{end+1} = sprintf( ...
+                        'Signal: converted to a signal per %s (x %s^2 / 1e7)', ...
+                        pu, app.pick(strcmp(app.specUnit, 'cm-1'), ...
+                        'wavenumber', 'wavelength'));
+                else
+                    L{end+1} = sprintf(['Signal: as it is (not converted ' ...
+                        'to a signal per %s)'], pu);
+                end
+            end
+            L{end+1} = sprintf('Found at %d of %d delays', nnz(T.ok), ...
+                numel(T.ok));
+            L{end+1} = '';
+            if isempty(F), return; end
+            if ~F.ok
+                L{end+1} = sprintf('No fit of the position: %s', F.msg);
+                return;
+            end
+            tf = app.delay(logical(F.mask));
+            L{end+1} = sprintf( ...
+                'Fit of the position, %.6g ... %.6g %s (%d delays):', ...
+                tf(1), tf(end), u, F.n);
+            for i = 1:numel(F.tau)
+                share = '';
+                if F.shift ~= 0
+                    share = sprintf('  (%.0f %%)', 100 * F.A(i) / F.shift);
+                end
+                L{end+1} = sprintf('  tau_%d = %s', i, ...
+                    app.pmText(F.tau(i), F.tauStd(i), u)); %#ok<AGROW>
+                L{end+1} = sprintf('    A_%d = %s%s', i, ...
+                    app.pmText(F.A(i), F.AStd(i), pu), share); %#ok<AGROW>
+            end
+            if any(F.tauLim)
+                L{end+1} = ['  A time constant lies at the limit of the ' ...
+                    'search: the data do not determine it, and the ' ...
+                    'values below rest on it. Use fewer exponentials.'];
+            end
+            L{end+1} = sprintf('  at long delays: %s', ...
+                app.pmText(F.vInf, F.vInfStd, pu));
+            L{end+1} = sprintf('  at delay 0 (extrapolated): %s', ...
+                app.pmText(F.v0, F.v0Std, pu));
+            L{end+1} = sprintf('  total shift: %.5g %s', F.shift, pu);
+            if all(F.A > 0) || all(F.A < 0)
+                L{end+1} = sprintf( ...
+                    '  average time, sum(A tau) / sum(A): %.4g %s', ...
+                    F.tauAvg, u);
+            end
+            L{end+1} = sprintf('  RMS of the residual: %.3g %s', F.rms, pu);
+            L{end+1} = '';
+            L{end+1} = 'C(t) = (position - position at long delays) / total shift';
+        end
+        
+        function [hdr, mat] = bandExportTable(app, S, T, F)
+            %BANDEXPORTTABLE  Table that the Band position window saves:
+            %   one row per delay; position, height, width, area and
+            %   asymmetry of the band, the fitted position, C(t) and its
+            %   fit (empty where there is none; no C(t) when a time
+            %   constant of the fit lies at the limit of the search).
+            t = app.delay(:);
+            n = numel(t);
+            fit = NaN(n, 1);  c = NaN(n, 1);  cfit = NaN(n, 1);
+            if ~isempty(F) && F.ok
+                m = logical(F.mask(:));
+                fit(m) = F.fit(m);
+                if F.shift ~= 0 && ~any(F.tauLim)
+                    c = (T.pos(:) - F.vInf) / F.shift;
+                    cfit(m) = (fit(m) - F.vInf) / F.shift;
+                end
+            end
+            pu = S.posUnit;
+            hdr = {sprintf('delay_%s', app.tUnitHdr()), ...
+                sprintf('position_%s', pu), 'height', ...
+                sprintf('width_fwhm_%s', pu), 'area', 'asymmetry', ...
+                sprintf('fit_%s', pu), 'C', 'C_fit'};
+            mat = [t, T.pos(:), T.height(:), T.width(:), T.area(:), ...
+                T.asym(:), fit, c, cfit];
+        end
+        
+        function openBandPositionWindow(app)
+            %OPENBANDPOSITIONWINDOW  Where a band lies at every delay
+            %   (spectral shift, dynamic Stokes shift), and the fit of
+            %   that time course with a sum of exponentials.
+            if isempty(app.deltaA)
+                uialert(app.fig, 'Load data first.', 'No data');
+                return;
+            end
+            if ~isempty(app.bandFig) && isvalid(app.bandFig)
+                figure(app.bandFig);  return;
+            end
+            
+            f = uifigure('Name', 'Band Position', ...
+                'Position', app.fitFigurePosition(1320, 820));
+            app.applyLightTheme(f);
+            app.bandFig = f;
+            f.CloseRequestFcn = @(~,~) onClose();
+            
+            u  = app.tUnitTxt();
+            S0 = app.bandSetupDefault();
+            sv = app.bpSaved;
+            hasSaved = isstruct(sv) && isscalar(sv) && isfield(sv, 'set') && ...
+                isstruct(sv.set) && isscalar(sv.set);
+            if hasSaved
+                fn0 = fieldnames(S0);
+                for q0 = 1:numel(fn0)
+                    if isfield(sv.set, fn0{q0})
+                        S0.(fn0{q0}) = sv.set.(fn0{q0});
+                    end
+                end
+            end
+            cData = [0.10 0.35 0.75];
+            cFit  = [0.85 0.20 0.15];
+            cPos  = [0.20 0.50 0.30];
+            
+            gl = uigridlayout(f, [1, 2]);
+            gl.ColumnWidth = {390, '1x'};
+            gl.Padding = [10 10 10 10];  gl.ColumnSpacing = 10;
+            
+            % ============== Left: setup ==============
+            left = uipanel(gl, 'Title', 'Band position setup');
+            left.Layout.Column = 1;
+            lgl = uigridlayout(left, [18, 1]);
+            % rows: bandLabel, band, sign, posLabel, unit, density,
+            %       method, fraction, threshold, fitLabel, tRange, nExp,
+            %       start, buttons, dispLabel, display, status, result
+            lgl.RowHeight = {22, 30, 30, 22, 30, 26, 30, 30, 30, ...
+                             22, 30, 30, 30, 32, 22, 30, 'fit', '1x'};
+            lgl.Padding = [8 8 8 8];  lgl.RowSpacing = 6;
+            
+            uilabel(lgl, 'Text', 'Band:', 'FontWeight', 'bold');
+            rw = uigridlayout(lgl, [1, 6]);
+            rw.ColumnWidth = {'fit', 80, 'fit', 80, 'fit', '1x'};
+            rw.Padding = [0 0 0 0];  rw.ColumnSpacing = 6;
+            uilabel(rw, 'Text', 'from');
+            edX1 = uieditfield(rw, 'numeric', 'Value', S0.x1, ...
+                'ValueDisplayFormat', '%.6g', ...
+                'Tooltip', ['The part of the spectral axis that holds ' ...
+                    'the band at all delays. Wavelengths without data ' ...
+                    '(masked) are left out.']);
+            uilabel(rw, 'Text', 'to');
+            edX2 = uieditfield(rw, 'numeric', 'Value', S0.x2, ...
+                'ValueDisplayFormat', '%.6g');
+            uilabel(rw, 'Text', app.xUnitTxt());
+            uilabel(rw, 'Text', '');
+            
+            rw = uigridlayout(lgl, [1, 3]);
+            rw.ColumnWidth = {'fit', 110, '1x'};
+            rw.Padding = [0 0 0 0];  rw.ColumnSpacing = 6;
+            uilabel(rw, 'Text', 'The band is:');
+            ddSign = uidropdown(rw, 'Items', {'Positive', 'Negative'}, ...
+                'ItemsData', {'pos', 'neg'}, 'Value', S0.sign, ...
+                'Tooltip', ['A negative band (bleach, stimulated ' ...
+                    'emission in dA) is turned over before its position ' ...
+                    'is taken.']);
+            uilabel(rw, 'Text', '');
+            
+            uilabel(lgl, 'Text', 'Position:', 'FontWeight', 'bold');
+            rw = uigridlayout(lgl, [1, 3]);
+            rw.ColumnWidth = {'fit', 170, '1x'};
+            rw.Padding = [0 0 0 0];  rw.ColumnSpacing = 6;
+            uilabel(rw, 'Text', 'given in:');
+            ddUnit = uidropdown(rw, ...
+                'Items', {'Wavenumber (cm-1)', 'Wavelength (nm)'}, ...
+                'ItemsData', {'cm-1', 'nm'}, 'Value', S0.posUnit);
+            uilabel(rw, 'Text', '');
+            
+            cbDens = uicheckbox(lgl, 'Text', '', ...
+                'Value', logical(S0.density), ...
+                'Tooltip', ['For a signal that is a density along the ' ...
+                    'spectral axis, as an emission intensity per nm: on ' ...
+                    'the other axis the same signal is the one per unit ' ...
+                    'of that axis, which is the signal times the square ' ...
+                    'of the axis value / 1e7. Leave it off for dA and ' ...
+                    'dT/T, which are no densities.']);
+            
+            rw = uigridlayout(lgl, [1, 3]);
+            rw.ColumnWidth = {'fit', 170, '1x'};
+            rw.Padding = [0 0 0 0];  rw.ColumnSpacing = 6;
+            uilabel(rw, 'Text', 'taken as:');
+            ddMethod = uidropdown(rw, ...
+                'Items', {'First moment', 'Maximum (parabola)', ...
+                    'Log-normal fit'}, ...
+                'ItemsData', {'moment', 'parabola', 'lognormal'}, ...
+                'Value', S0.method, ...
+                'Tooltip', ['First moment: the mean of the axis weighted ' ...
+                    'with the signal, over the whole band; no assumption ' ...
+                    'about the shape, but the band has to lie inside the ' ...
+                    'range at all delays. Maximum (parabola): the top of ' ...
+                    'a parabola through the highest points. Log-normal ' ...
+                    'fit: the maximum of a log-normal band fitted to the ' ...
+                    'whole range (height, position, width, asymmetry).']);
+            uilabel(rw, 'Text', '');
+            
+            rw = uigridlayout(lgl, [1, 4]);
+            rw.ColumnWidth = {'fit', 60, 'fit', '1x'};
+            rw.Padding = [0 0 0 0];  rw.ColumnSpacing = 6;
+            lblFrac = uilabel(rw, 'Text', 'Parabola: points from');
+            edFrac = uieditfield(rw, 'numeric', 'Value', S0.frac, ...
+                'Limits', [0.05 0.99], 'ValueDisplayFormat', '%.3g');
+            lblFrac2 = uilabel(rw, 'Text', 'of the maximum');
+            uilabel(rw, 'Text', '');
+            
+            rw = uigridlayout(lgl, [1, 4]);
+            rw.ColumnWidth = {'fit', 60, 'fit', '1x'};
+            rw.Padding = [0 0 0 0];  rw.ColumnSpacing = 6;
+            uilabel(rw, 'Text', 'No position below');
+            edMin = uieditfield(rw, 'numeric', 'Value', S0.minPct, ...
+                'Limits', [0 100], 'ValueDisplayFormat', '%.3g', ...
+                'Tooltip', ['A delay gets a position only when the ' ...
+                    'largest value of its band is at least this share ' ...
+                    'of the largest value of the band at all delays: ' ...
+                    'before the signal has risen there is no band.']);
+            uilabel(rw, 'Text', '% of the largest signal');
+            uilabel(rw, 'Text', '');
+            
+            uilabel(lgl, 'Text', 'Fit of the position (sum of exponentials):', ...
+                'FontWeight', 'bold');
+            rw = uigridlayout(lgl, [1, 6]);
+            rw.ColumnWidth = {'fit', 80, 'fit', 80, 'fit', '1x'};
+            rw.Padding = [0 0 0 0];  rw.ColumnSpacing = 6;
+            uilabel(rw, 'Text', 't from');
+            edT1 = uieditfield(rw, 'numeric', 'Value', S0.tFrom, ...
+                'ValueDisplayFormat', '%.6g', ...
+                'Tooltip', ['Delays of the fit. Start after the ' ...
+                    'instrument response: while the signal rises, the ' ...
+                    'spectrum is a mixture of earlier and later times.']);
+            uilabel(rw, 'Text', 'to');
+            edT2 = uieditfield(rw, 'numeric', 'Value', S0.tTo, ...
+                'ValueDisplayFormat', '%.6g');
+            uilabel(rw, 'Text', u);
+            uilabel(rw, 'Text', '');
+            
+            rw = uigridlayout(lgl, [1, 3]);
+            rw.ColumnWidth = {'fit', 70, '1x'};
+            rw.Padding = [0 0 0 0];  rw.ColumnSpacing = 6;
+            uilabel(rw, 'Text', 'Exponentials:');
+            ddN = uidropdown(rw, 'Items', {'1', '2', '3', '4'}, ...
+                'Value', sprintf('%d', min(max(round(S0.nExp), 1), 4)));
+            uilabel(rw, 'Text', '');
+            
+            rw = uigridlayout(lgl, [1, 2]);
+            rw.ColumnWidth = {'fit', '1x'};
+            rw.Padding = [0 0 0 0];  rw.ColumnSpacing = 6;
+            uilabel(rw, 'Text', app.uiStr(sprintf('Start \\tau (%s):', u)));
+            tauTxt = '';
+            if ~isempty(S0.tauStart)
+                tauTxt = strtrim(sprintf('%.4g ', S0.tauStart));
+            end
+            edTau = uieditfield(rw, 'text', 'Value', tauTxt, ...
+                'Tooltip', ['Starting time constants, separated by ' ...
+                    'spaces or commas, one per exponential. Empty: three ' ...
+                    'automatic starts are tried and the best fit is kept.']);
+            
+            rw = uigridlayout(lgl, [1, 3]);
+            rw.ColumnWidth = {'1x', '1x', '1x'};
+            rw.Padding = [0 0 0 0];  rw.ColumnSpacing = 6;
+            btnRun = uibutton(rw, 'Text', 'Run', ...
+                'BackgroundColor', [0.45 0.40 0.70], ...
+                'FontColor', 'w', 'FontWeight', 'bold');
+            btnReset = uibutton(rw, 'Text', 'Reset');
+            btnExport = uibutton(rw, 'Text', 'Export...', 'Enable', 'off');
+            
+            uilabel(lgl, 'Text', 'Display:', 'FontWeight', 'bold');
+            rw = uigridlayout(lgl, [1, 5]);
+            rw.ColumnWidth = {'fit', 80, 'fit', 'fit', '1x'};
+            rw.Padding = [0 0 0 0];  rw.ColumnSpacing = 6;
+            uilabel(rw, 'Text', 'Band at t:');
+            edTS = uieditfield(rw, 'numeric', 'Value', S0.tSpec, ...
+                'ValueDisplayFormat', '%.6g');
+            uilabel(rw, 'Text', u);
+            cbLog = uicheckbox(rw, 'Text', 'Log delay axis', ...
+                'Value', logical(S0.logT));
+            uilabel(rw, 'Text', '');
+            
+            lblStatus = uilabel(lgl, 'Text', 'Ready.', 'WordWrap', 'on', ...
+                'FontColor', [0.2 0.2 0.2]);
+            txtResult = uitextarea(lgl, 'Editable', 'off', ...
+                'Value', {'Press "Run" to follow the band.'}, ...
+                'FontName', 'Monospaced');
+            
+            % ============== Right: plots ==============
+            right = uipanel(gl, 'Title', 'Results');
+            right.Layout.Column = 2;
+            rgl = uigridlayout(right, [2, 2]);
+            rgl.ColumnWidth = {'1x', '1x'};
+            rgl.RowHeight   = {'1x', '1x'};
+            rgl.Padding     = [8 8 8 8];  rgl.RowSpacing = 8;
+            rgl.ColumnSpacing = 10;
+            axS = app.boxAxes(rgl, [56 14 24 40], 1, 1);
+            axP = app.boxAxes(rgl, [56 14 24 40], 1, 2);
+            axC = app.boxAxes(rgl, [56 14 24 40], 2, 1);
+            axW = app.boxAxes(rgl, [56 14 24 40], 2, 2);
+            
+            % ---- State: the last run (shared with the functions below) ----
+            curS = [];  curT = [];  curF = [];  curInfo = [];
+            
+            btnRun.ButtonPushedFcn    = @(~,~) safeCb(@doRun, 'Run');
+            btnReset.ButtonPushedFcn  = @(~,~) safeCb(@doReset, 'Reset');
+            btnExport.ButtonPushedFcn = @(~,~) safeCb(@doExport, 'Export');
+            ddUnit.ValueChangedFcn    = @(~,~) syncControls();
+            ddMethod.ValueChangedFcn  = @(~,~) syncControls();
+            edTS.ValueChangedFcn      = @(~,~) safeCb(@onDisplay, 'Display');
+            cbLog.ValueChangedFcn     = @(~,~) safeCb(@onDisplay, 'Display');
+            syncControls();
+            
+            % ---- Restore the last run (if any) ----
+            if hasSaved && isfield(sv, 'res') && isstruct(sv.res) && ...
+                    isfield(sv.res, 'pos') && ...
+                    numel(sv.res.pos) == numel(app.delay)
+                try
+                    curS = S0;  curInfo = sv.info;  curT = sv.res;
+                    if isfield(sv, 'fit') && isstruct(sv.fit)
+                        curF = sv.fit;
+                    end
+                    txtResult.Value = sv.lines;
+                    lblStatus.Text = sprintf('%s  [restored]', sv.status);
+                    btnExport.Enable = 'on';
+                catch
+                    curS = [];  curT = [];  curF = [];  curInfo = [];
+                end
+            end
+            drawAll();
+            
+            function safeCb(fcn, label)
+                try
+                    fcn();
+                catch ME
+                    uialert(f, sprintf('"%s" failed:\n%s\n\n(In %s line %d)', ...
+                        label, ME.message, ...
+                        ME.stack(1).name, ME.stack(1).line), ...
+                        'Callback error');
+                    lblStatus.Text = sprintf('Error in %s.', label);
+                end
+            end
+            
+            function tv = tauStart()
+                % Starting time constants as entered (empty: automatic).
+                txt = strtrim(strrep(edTau.Value, ',', ' '));
+                tv = [];
+                if isempty(txt), return; end
+                tv = str2double(strsplit(txt));
+                if any(isnan(tv))
+                    error(['The starting time constants must be ' ...
+                        'numbers, separated by spaces or commas.']);
+                end
+            end
+            
+            function S = setup()
+                % The setup as entered.
+                S = struct('x1', edX1.Value, 'x2', edX2.Value, ...
+                    'sign', ddSign.Value, 'posUnit', ddUnit.Value, ...
+                    'density', logical(cbDens.Value), ...
+                    'method', ddMethod.Value, 'frac', edFrac.Value, ...
+                    'minPct', edMin.Value, 'tFrom', edT1.Value, ...
+                    'tTo', edT2.Value, 'nExp', str2double(ddN.Value), ...
+                    'tauStart', tauStart(), 'tSpec', edTS.Value, ...
+                    'logT', logical(cbLog.Value));
+            end
+            
+            function syncControls()
+                % The box names the conversion to the other axis; it
+                % can be set only while the position is given there.
+                other = ~strcmp(ddUnit.Value, app.specUnit);
+                cbDens.Enable = app.pick(other, 'on', 'off');
+                cbDens.Text = sprintf( ...
+                    'Signal per %s: convert to a signal per %s', ...
+                    app.xUnitTxt(), ...
+                    app.pick(strcmp(app.specUnit, 'cm-1'), 'nm', 'cm-1'));
+                para = app.pick(strcmp(ddMethod.Value, 'parabola'), ...
+                    'on', 'off');
+                lblFrac.Enable = para;
+                edFrac.Enable = para;
+                lblFrac2.Enable = para;
+            end
+            
+            function doRun()
+                S = setup();
+                if ~isempty(S.tauStart) && numel(S.tauStart) ~= S.nExp
+                    uialert(f, sprintf(['Give %d starting time ' ...
+                        'constant%s, or leave the field empty.'], S.nExp, ...
+                        app.pick(S.nExp == 1, '', 's')), 'Invalid');
+                    return;
+                end
+                lblStatus.Text = 'Following the band...';  drawnow;
+                [T, binfo] = app.bandTrack(S);
+                if isempty(T)
+                    lblStatus.Text = binfo.err;
+                    return;
+                end
+                nOk = nnz(T.ok);
+                if nOk == 0
+                    curT = T;  curF = [];  curInfo = binfo;  curS = S;
+                    lblStatus.Text = ['No position found at any delay: ' ...
+                        'check the range and the sign of the band.'];
+                    txtResult.Value = app.bandShiftLines(S, T, binfo, []);
+                    btnExport.Enable = 'off';
+                    app.bpSaved = [];
+                    drawAll();
+                    return;
+                end
+                F = app.fitBandShift(app.delay, T.pos, ...
+                    [S.tFrom, S.tTo], S.nExp, S.tauStart);
+                curT = T;  curF = F;  curInfo = binfo;  curS = S;
+                lines = app.bandShiftLines(S, T, binfo, F);
+                txtResult.Value = lines;
+                if F.ok
+                    lblStatus.Text = sprintf(['Done. Position at %d of ' ...
+                        '%d delays; fit RMS %.3g %s.'], nOk, numel(T.ok), ...
+                        F.rms, S.posUnit);
+                else
+                    lblStatus.Text = sprintf(['Position at %d of %d ' ...
+                        'delays. No fit: %s'], nOk, numel(T.ok), F.msg);
+                end
+                btnExport.Enable = 'on';
+                app.bpSaved = struct('set', S, 'info', binfo, 'res', T, ...
+                    'fit', F, 'lines', {lines}, 'status', lblStatus.Text);
+                drawAll();
+            end
+            
+            function doReset()
+                app.bpSaved = [];
+                Sd = app.bandSetupDefault();
+                edX1.Value = Sd.x1;  edX2.Value = Sd.x2;
+                ddSign.Value = Sd.sign;  ddUnit.Value = Sd.posUnit;
+                cbDens.Value = logical(Sd.density);
+                ddMethod.Value = Sd.method;
+                edFrac.Value = Sd.frac;  edMin.Value = Sd.minPct;
+                edT1.Value = Sd.tFrom;  edT2.Value = Sd.tTo;
+                ddN.Value = sprintf('%d', Sd.nExp);
+                edTau.Value = '';
+                curS = [];  curT = [];  curF = [];  curInfo = [];
+                btnExport.Enable = 'off';
+                lblStatus.Text = 'Reset.';
+                txtResult.Value = {'Press "Run" to follow the band.'};
+                syncControls();
+                drawAll();
+            end
+            
+            function onDisplay()
+                % The delay of the spectrum shown or the scale of the
+                % delay axis changed: redraw, and keep the choice with
+                % the result.
+                if isstruct(app.bpSaved) && isfield(app.bpSaved, 'set')
+                    app.bpSaved.set.tSpec = edTS.Value;
+                    app.bpSaved.set.logT = logical(cbLog.Value);
+                end
+                drawAll();
+            end
+            
+            function setTAxis(axT, tShown)
+                % Scale and limits of a delay axis for the delays shown.
+                tShown = tShown(isfinite(tShown));
+                if cbLog.Value && any(tShown > 0)
+                    axT.XScale = 'log';
+                    tPos = tShown(tShown > 0);
+                    if max(tPos) > min(tPos)
+                        xlim(axT, [min(tPos) / 1.3, max(tPos) * 1.3]);
+                    end
+                elseif ~isempty(tShown) && max(tShown) > min(tShown)
+                    padT = 0.03 * (max(tShown) - min(tShown));
+                    xlim(axT, [min(tShown) - padT, max(tShown) + padT]);
+                end
+            end
+            
+            function drawAll()
+                axs = {axS, axP, axC, axW};
+                ttl = {'Band at the delay chosen', 'Position of the band', ...
+                    'C(t)', 'Width of the band (FWHM)'};
+                for ka = 1:4
+                    app.claAll(axs{ka});
+                    legend(axs{ka}, 'off');
+                    axs{ka}.XScale = 'linear';
+                    xlim(axs{ka}, 'auto');  ylim(axs{ka}, 'auto');
+                    title(axs{ka}, ttl{ka});
+                    grid(axs{ka}, 'on');
+                end
+                pu = ddUnit.Value;
+                if ~isempty(curS), pu = curS.posUnit; end
+                if strcmp(pu, 'cm-1')
+                    puAx = 'cm^{-1}';  posName = 'Wavenumber';
+                else
+                    puAx = 'nm';  posName = 'Wavelength';
+                end
+                xlabel(axS, sprintf('%s (%s)', posName, puAx));
+                ylabel(axS, 'Signal');
+                xlabel(axP, sprintf('Delay time (%s)', app.tUnitAx()));
+                xlabel(axC, sprintf('Delay time (%s)', app.tUnitAx()));
+                xlabel(axW, sprintf('Delay time (%s)', app.tUnitAx()));
+                ylabel(axP, sprintf('Position (%s)', puAx));
+                ylabel(axC, 'C(t)');
+                ylabel(axW, sprintf('FWHM (%s)', puAx));
+                if isempty(curT) || isempty(curS), return; end
+                t  = app.delay(:).';
+                ok = logical(curT.ok(:).');
+                isLog = cbLog.Value && any(t(ok) > 0);
+                shown = ok;
+                if isLog, shown = ok & t > 0; end
+                
+                % ---- the band at one delay ----
+                [v, Y, binfo] = app.bandSpectra(curS);
+                if isempty(binfo.err)
+                    [~, j] = min(abs(t - edTS.Value));
+                    hold(axS, 'on');
+                    hs = gobjects(0);
+                    hs(end+1) = plot(axS, v, Y(:, j), '.-', 'Color', cData, ...
+                        'MarkerSize', 8, 'LineWidth', 0.9, ...
+                        'DisplayName', 'data');
+                    yline(axS, 0, 'k:', 'HandleVisibility', 'off');
+                    if ok(j)
+                        if strcmp(curS.method, 'parabola')
+                            [~, ~, i1, i2] = app.bandParabola(v, Y(:, j), ...
+                                curS.frac);
+                            vv = linspace(v(i1), v(i2), 60);
+                            hs(end+1) = plot(axS, vv, app.bandModelCurve( ...
+                                vv, 'parabola', curT.par(:, j)), '-', ...
+                                'Color', cFit, 'LineWidth', 1.6, ...
+                                'DisplayName', 'parabola');
+                        elseif strcmp(curS.method, 'lognormal')
+                            vv = linspace(v(1), v(end), 400);
+                            hs(end+1) = plot(axS, vv, app.bandModelCurve( ...
+                                vv, 'lognormal', curT.par(:, j)), '-', ...
+                                'Color', cFit, 'LineWidth', 1.4, ...
+                                'DisplayName', 'log-normal band');
+                        end
+                        hs(end+1) = xline(axS, curT.pos(j), '--', ...
+                            'Color', cPos, 'LineWidth', 1.3, ...
+                            'DisplayName', sprintf('position: %.6g', ...
+                            curT.pos(j)));
+                        title(axS, sprintf('Band at t = %.4g %s', t(j), ...
+                            app.tUnitAx()));
+                    else
+                        title(axS, sprintf('Band at t = %.4g %s: no position', ...
+                            t(j), app.tUnitAx()));
+                    end
+                    hold(axS, 'off');
+                    xlim(axS, [v(1), v(end)]);
+                    legend(axS, hs, 'Location', 'best');
+                end
+                
+                % ---- the fitted curve on a fine grid ----
+                tFine = [];  yFine = [];
+                hasFit = ~isempty(curF) && curF.ok;
+                if hasFit
+                    tm = t(logical(curF.mask));
+                    if isLog && tm(1) > 0
+                        tFine = exp(linspace(log(tm(1)), log(tm(end)), 300));
+                    else
+                        tFine = linspace(tm(1), tm(end), 300);
+                        if isLog, tFine = tFine(tFine > 0); end
+                    end
+                    yFine = curF.vInf + (exp(-tFine(:) ./ curF.tau(:).') * ...
+                        curF.A(:)).';
+                end
+                
+                % ---- position along the delays ----
+                % (plot() draws nothing for empty data and returns no
+                % handle, so every curve is drawn only when it has
+                % points, and a legend only when there is a curve)
+                hold(axP, 'on');
+                hp = gobjects(0);
+                if any(shown)
+                    hp(end+1) = plot(axP, t(shown), curT.pos(shown), 'o', ...
+                        'Color', cData, 'MarkerSize', 4, ...
+                        'DisplayName', 'position');
+                end
+                % (a time constant at the limit of the search: the
+                % position at long delays and C(t) mean nothing)
+                hasC = hasFit && curF.shift ~= 0 && ~any(curF.tauLim);
+                if hasFit && ~isempty(tFine)
+                    hp(end+1) = plot(axP, tFine, yFine, '-', 'Color', cFit, ...
+                        'LineWidth', 1.4, 'DisplayName', 'fit');
+                end
+                if hasC
+                    hp(end+1) = yline(axP, curF.vInf, '--', ...
+                        'Color', [0.4 0.4 0.4], 'LineWidth', 1.0, ...
+                        'DisplayName', 'at long delays');
+                end
+                hold(axP, 'off');
+                setTAxis(axP, t(shown));
+                if ~isempty(hp)
+                    legend(axP, hp, 'Location', 'best');
+                end
+                
+                % ---- C(t) ----
+                if hasC
+                    mc = shown & logical(curF.mask(:).');
+                    hold(axC, 'on');
+                    hc = gobjects(0);
+                    if any(mc)
+                        hc(end+1) = plot(axC, t(mc), ...
+                            (curT.pos(mc) - curF.vInf) / curF.shift, 'o', ...
+                            'Color', cData, 'MarkerSize', 4, ...
+                            'DisplayName', 'data');
+                    end
+                    if ~isempty(tFine)
+                        hc(end+1) = plot(axC, tFine, ...
+                            (yFine - curF.vInf) / curF.shift, '-', ...
+                            'Color', cFit, 'LineWidth', 1.4, ...
+                            'DisplayName', 'fit');
+                    end
+                    yline(axC, 0, 'k:', 'HandleVisibility', 'off');
+                    hold(axC, 'off');
+                    setTAxis(axC, t(mc));
+                    if ~isempty(hc)
+                        legend(axC, hc, 'Location', 'best');
+                    end
+                elseif hasFit && any(curF.tauLim)
+                    title(axC, 'C(t): a time constant is not determined');
+                else
+                    title(axC, 'C(t): needs the fit of the position');
+                end
+                
+                % ---- width ----
+                mw = shown & isfinite(curT.width(:).');
+                if any(mw)
+                    plot(axW, t(mw), curT.width(mw), 'o', 'Color', cData, ...
+                        'MarkerSize', 4);
+                    grid(axW, 'on');
+                    title(axW, 'Width of the band (FWHM)');
+                    xlabel(axW, sprintf('Delay time (%s)', app.tUnitAx()));
+                    ylabel(axW, sprintf('FWHM (%s)', puAx));
+                    setTAxis(axW, t(mw));
+                end
+            end
+            
+            function doExport()
+                if isempty(curT) || isempty(curS), return; end
+                stem = app.dataStem();
+                if isempty(stem), stem = 'data'; end
+                [file, path] = app.putFile( ...
+                    {'*.csv','CSV (*.csv)'; '*.dat','DAT (tab, *.dat)'}, ...
+                    'Save the position of the band', ...
+                    [stem '_band_position.csv']);
+                if isequal(file, 0), return; end
+                full = fullfile(path, file);
+                [~, ~, ext] = fileparts(full);
+                if strcmpi(ext, '.csv'), dlm = ','; else, dlm = sprintf('\t'); end
+                try
+                    [hdr, mat] = app.bandExportTable(curS, curT, curF);
+                    Tb = array2table(mat, 'VariableNames', hdr);
+                    writetable(Tb, full, 'Delimiter', dlm);
+                    uialert(f, sprintf('Saved: %s', full), ...
+                        'Exported', 'Icon', 'success');
+                catch ME
+                    uialert(f, sprintf('Export failed:\n%s', ME.message), ...
+                        'Error');
+                end
+            end
+            
+            function onClose()
+                app.bandFig = [];
+                delete(f);
+            end
+        end
+        
+        function y = bandValue(~, X, x, mode)
+            %BANDVALUE  One trace from the rows X (wavelength x delay) of
+            %   a band with the axis values x. 'mean': mean over the
+            %   wavelengths; 'integral': integral over the spectral axis
+            %   (trapezoid). A delay at which one of the wavelengths has
+            %   no value stays empty, so that the same wavelengths
+            %   contribute at every delay.
+            y  = NaN(1, size(X, 2));
+            ok = all(isfinite(X), 1);
+            if ~any(ok), return; end
+            if strcmp(mode, 'mean')
+                y(ok) = mean(X(:, ok), 1);
+            else
+                [xs, k] = sort(x(:));
+                Xs = X(k, ok);
+                dx = diff(xs);
+                y(ok) = sum(dx .* (Xs(1:end-1, :) + Xs(2:end, :)), 1) / 2;
+            end
+        end
+        
+        function [d, info] = kinTrace(app, w1, isBand, w2, mode)
+            %KINTRACE  The trace the Fit trace window works on.
+            %   Not a band: the data at the wavelength nearest to w1.
+            %   A band: the wavelengths from w1 to w2, as their integral
+            %   over the spectral axis or as their mean (bandValue).
+            %   Wavelengths without data at any delay (masked) are left
+            %   out. In the view Anisotropy r the band values of the
+            %   parallel and of the perpendicular data are formed first
+            %   and r is calculated from them: r is a ratio, and its
+            %   mean over a band would be ruled by the wavelengths with
+            %   little signal. info.err is a text when there is no trace.
+            x = app.wavelength(:);
+            info = struct('band', false, 'wl', NaN, 'iw', NaN, 'w2', NaN, ...
+                'lo', NaN, 'hi', NaN, 'n', 0, 'nSkip', 0, 'mode', '', ...
+                'isR', false, 'err', '');
+            if ~isBand
+                [~, iw] = min(abs(x - w1));
+                info.wl = x(iw);  info.iw = iw;  info.n = 1;
+                d = app.deltaA(iw, :);
+                return;
+            end
+            if ~strcmp(mode, 'mean'), mode = 'integral'; end
+            info.band = true;  info.mode = mode;
+            info.wl = w1;  info.w2 = w2;
+            d = NaN(1, numel(app.delay));
+            if ~(isfinite(w1) && isfinite(w2))
+                info.err = 'Enter both ends of the band.';
+                return;
+            end
+            rows = find(x >= min(w1, w2) & x <= max(w1, w2));
+            isR = app.aniOn && strcmp(app.aniView, 'r') && ...
+                ~isempty(app.aniPar) && ~isempty(app.aniPerp);
+            if isR, X = app.aniPar; else, X = app.deltaA; end
+            use = rows(any(isfinite(X(rows, :)), 2));
+            info.n = numel(use);
+            info.nSkip = numel(rows) - numel(use);
+            info.isR = isR;
+            if numel(use) < 1 + strcmp(mode, 'integral')
+                if strcmp(mode, 'integral')
+                    info.err = 'The band holds fewer than 2 wavelengths with data.';
+                else
+                    info.err = 'The band holds no wavelength with data.';
+                end
+                return;
+            end
+            info.lo = min(x(use));  info.hi = max(x(use));
+            if isR
+                P = app.bandValue(app.aniPar(use, :), x(use), mode);
+                S = app.bandValue(app.aniPerp(use, :), x(use), mode);
+                G = app.aniGUsed;
+                den = P + 2 * G * S;
+                d = (P - G * S) ./ den;
+                sg = app.autoNoise(den, app.delay);
+                d(abs(den) < app.aniThr * sg) = NaN;   % (no noise value: kept)
+                d(~isfinite(d)) = NaN;
+            else
+                d = app.bandValue(X(use, :), x(use), mode);
+            end
+        end
+        
+        function s = kinTraceLabel(app, info, what)
+            %KINTRACELABEL  Texts of the Fit trace window for the trace
+            %   that info (of kinTrace) describes. what: 'at' (plot
+            %   titles), 'ylabel', 'file' (suggested name without
+            %   extension), 'export' (title of the file dialog), 'param'
+            %   (line of the parameter file), 'lines' (first lines of
+            %   the result box, a cell array).
+            ut = app.xUnitTxt();
+            if strcmp(app.specUnit, 'cm-1')
+                name = 'Wavenumber';
+            else
+                name = 'Wavelength';
+            end
+            if strcmp(info.mode, 'integral')
+                how = sprintf('integral over %d wavelengths', info.n);
+            else
+                how = sprintf('mean of %d wavelengths', info.n);
+            end
+            switch what
+                case 'at'
+                    if info.band
+                        s = sprintf('band %.2f ... %.2f %s (%s)', ...
+                            info.lo, info.hi, app.xUnitAx(), info.mode);
+                    else
+                        s = sprintf('%s = %.2f %s', app.xSym(), info.wl, ...
+                            app.xUnitAx());
+                    end
+                case 'ylabel'
+                    if info.band && ~info.isR
+                        s = sprintf('Band %s of %s', info.mode, app.sigName());
+                    else
+                        s = app.sigName();
+                    end
+                case 'file'
+                    if info.band
+                        s = sprintf('kinfit_band_%.1f-%.1f%s', info.lo, ...
+                            info.hi, ut);
+                    else
+                        s = sprintf('kinfit_%.1f%s', info.wl, ut);
+                    end
+                case 'export'
+                    if info.band
+                        s = sprintf('Export kinetic fit, band %.2f ... %.2f %s', ...
+                            info.lo, info.hi, ut);
+                    else
+                        s = sprintf('Export kinetic fit @ %.2f %s', info.wl, ut);
+                    end
+                case 'param'
+                    if ~info.band
+                        s = sprintf('%s: %.4f %s', name, info.wl, ut);
+                    else
+                        s = sprintf('Band: %.4f ... %.4f %s, %s', info.lo, ...
+                            info.hi, ut, how);
+                        if info.nSkip > 0
+                            s = sprintf('%s (%d without data left out)', ...
+                                s, info.nSkip);
+                        end
+                        if info.isR
+                            s = [s ', r from the band values of the two polarizations'];
+                        end
+                    end
+                otherwise   % 'lines'
+                    if ~info.band
+                        s = {sprintf('%-11s: %.2f %s', name, info.wl, ut)};
+                    else
+                        s = {sprintf('%-11s: %.2f ... %.2f %s', 'Band', ...
+                                info.lo, info.hi, ut), ['  ' how]};
+                        if info.nSkip > 0
+                            s{end+1} = sprintf('  (%d without data left out)', ...
+                                info.nSkip);
+                        end
+                        if info.isR
+                            s{end+1} = '  r from the band values of the two';
+                            s{end+1} = '  polarizations';
+                        end
+                    end
+            end
+        end
+        
         function openKineticFitWindow(app)
             if isempty(app.deltaA)
                 uialert(app.fig, 'Load data first.', 'No data');
@@ -8857,8 +14243,8 @@ classdef TRSpecAnalyzer < handle
             % ============ Left: setup ============
             left = uipanel(gl, 'Title', 'Fit setup');
             left.Layout.Column = 1;
-            lgl = uigridlayout(left, [12, 1]);
-            lgl.RowHeight = {30, 30, 30, 22, 150, 30, 30, 30, 30, 32, 22, '1x'};
+            lgl = uigridlayout(left, [13, 1]);
+            lgl.RowHeight = {30, 30, 30, 30, 22, 150, 30, 30, 30, 30, 32, 22, '1x'};
             lgl.Padding = [8 8 8 8];  lgl.RowSpacing = 6;
             
             % Wavelength row
@@ -8870,6 +14256,31 @@ classdef TRSpecAnalyzer < handle
                 'Limits', [min(app.wavelength), max(app.wavelength)]);
             btnUseSel = uibutton(rowWL, 'Text', 'Use crosshair');
             uilabel(rowWL, 'Text', '');
+            
+            % A band instead of one wavelength
+            rowB = uigridlayout(lgl, [1, 4]);
+            rowB.ColumnWidth = {'fit', 80, 90, '1x'};
+            rowB.Padding = [0 0 0 0];  rowB.ColumnSpacing = 6;
+            cbBand = uicheckbox(rowB, 'Text', 'Band, to:', ...
+                'Value', logical(app.kfBandOn), ...
+                'Tooltip', ['Fit the kinetics of a band instead of one ' ...
+                            'wavelength: from the value above to the ' ...
+                            'value given here.']);
+            edB2 = uieditfield(rowB, 'numeric', 'Value', bandEndStart(), ...
+                'Limits', [min(app.wavelength), max(app.wavelength)]);
+            ddBand = uidropdown(rowB, 'Items', {'Integral', 'Mean'}, ...
+                'ItemsData', {'integral', 'mean'}, 'Value', 'integral', ...
+                'Tooltip', ['Integral: integral of the signal over the ' ...
+                            'spectral axis of the band (trapezoid). Mean: ' ...
+                            'mean over the wavelengths of the band, in the ' ...
+                            'unit of the signal. On an evenly spaced axis ' ...
+                            'both give the same time constants. Wavelengths ' ...
+                            'without data (masked) are left out; a delay at ' ...
+                            'which one of the others has no value stays ' ...
+                            'empty.']);
+            if strcmp(app.kfBandMode, 'mean'), ddBand.Value = 'mean'; end
+            uilabel(rowB, 'Text', '');
+            setBandEnable();
             
             % Components + tau=inf
             rowC = uigridlayout(lgl, [1, 3]);
@@ -8987,23 +14398,34 @@ classdef TRSpecAnalyzer < handle
             % ============ Right: data + fit + residual ============
             right = uipanel(gl, 'Title', 'Trace and fit');
             right.Layout.Column = 2;
-            rgl = uigridlayout(right, [2, 1]);
-            rgl.RowHeight = {'2x', '1x'};
-            rgl.Padding = [6 6 6 6];  rgl.RowSpacing = 6;
+            rgl = uigridlayout(right, [1, 1]);
+            rgl.Padding = [6 6 6 6];
+            % The two plots are in one panel and their plot boxes are
+            % placed by hand (alignStack): the residual plot has the
+            % left and the right edge of the trace plot above it. As
+            % cells of the grid, each axes gave its box the room its own
+            % tick labels leave, and the left edges differed.
+            pnlPlots = uipanel(rgl, 'BorderType', 'none');
+            try, pnlPlots.AutoResizeChildren = 'off'; catch, end
             
-            axTrace = uiaxes(rgl);
-            axTrace.Layout.Row = 1;
+            axTrace = uiaxes(pnlPlots);
             xlabel(axTrace, sprintf('Delay time (%s)', app.tUnitAx()));
-            ylabel(axTrace, '\DeltaA or Intensity');
+            ylabel(axTrace, app.sigName());
             grid(axTrace, 'on');
             title(axTrace, 'Click "Run Fit" to fit the kinetic trace');
             
-            axRes = uiaxes(rgl);
-            axRes.Layout.Row = 2;
+            axRes = uiaxes(pnlPlots);
             xlabel(axRes, sprintf('Delay time (%s)', app.tUnitAx()));
-            ylabel(axRes, 'Residual (\DeltaA or Intensity)');
+            ylabel(axRes, ['Residual (' app.sigName() ')']);
             grid(axRes, 'on');
             title(axRes, 'Residual');
+            
+            % trace : residual = 2 : 1 in height, as before; the room
+            % around the plot boxes in pixels (left, right, above, below)
+            layoutPlots = @() app.alignStack(pnlPlots, [axTrace, axRes], ...
+                [2 1], 6, 56, 14, 22, 38);
+            layoutPlots();
+            pnlPlots.SizeChangedFcn = @(~,~) layoutPlots();
             
             % Keep the two axes' x-limits in sync.
             try, linkaxes([axTrace, axRes], 'x'); catch, end
@@ -9032,6 +14454,13 @@ classdef TRSpecAnalyzer < handle
                 try
                     lastFit = app.kfSaved.lastFit;
                     edWL.Value = lastFit.wlActual;
+                    rfi = fitInfo();
+                    cbBand.Value = logical(rfi.band);
+                    if rfi.band
+                        edB2.Value   = rfi.w2;
+                        ddBand.Value = rfi.mode;
+                    end
+                    setBandEnable();
                     drawWithFit();
                     txtResult.Value = app.kfSaved.lines;
                     lblStatus.Text  = sprintf('%s  [restored]', ...
@@ -9044,6 +14473,9 @@ classdef TRSpecAnalyzer < handle
             ddN.ValueChangedFcn      = @(~,~) onNCompChange();
             ddScale.ValueChangedFcn  = @(~,~) refreshAxesScale();
             edWL.ValueChangedFcn     = @(~,~) drawTraceOnly();
+            cbBand.ValueChangedFcn   = @(~,~) onBandChange();
+            edB2.ValueChangedFcn     = @(~,~) onBandChange();
+            ddBand.ValueChangedFcn   = @(~,~) onBandChange();
             btnUseSel.ButtonPushedFcn = @(~,~) useCrosshair();
             btnRun.ButtonPushedFcn    = @(~,~) doRun();
             btnReset.ButtonPushedFcn  = @(~,~) doReset();
@@ -9160,6 +14592,54 @@ classdef TRSpecAnalyzer < handle
                 drawTraceOnly();
             end
             
+            function v = bandEndStart()
+                % Other end of the band when the window opens: the value
+                % used last, or 5 % of the spectral axis beside the
+                % wavelength.
+                lo = min(app.wavelength);  hi = max(app.wavelength);
+                v = app.kfBandTo;
+                if isscalar(v) && isfinite(v) && v >= lo && v <= hi
+                    return;
+                end
+                step = 0.05 * (hi - lo);
+                v = app.selWL + step;
+                if v > hi, v = app.selWL - step; end
+                v = min(max(v, lo), hi);
+            end
+            
+            function setBandEnable()
+                if cbBand.Value
+                    edB2.Enable = 'on';   ddBand.Enable = 'on';
+                else
+                    edB2.Enable = 'off';  ddBand.Enable = 'off';
+                end
+            end
+            
+            function onBandChange()
+                setBandEnable();
+                app.kfBandOn   = logical(cbBand.Value);
+                app.kfBandTo   = edB2.Value;
+                app.kfBandMode = ddBand.Value;
+                drawTraceOnly();
+            end
+            
+            function [d, ti] = traceNow()
+                % The trace the controls ask for.
+                [d, ti] = app.kinTrace(edWL.Value, cbBand.Value, ...
+                    edB2.Value, ddBand.Value);
+            end
+            
+            function fi = fitInfo()
+                % Description of the trace of the last fit (a result kept
+                % by an earlier version has none: one wavelength).
+                if isfield(lastFit, 'info') && isstruct(lastFit.info) && ...
+                        isfield(lastFit.info, 'band')
+                    fi = lastFit.info;
+                else
+                    [~, fi] = app.kinTrace(lastFit.wlActual, false, NaN, '');
+                end
+            end
+            
             function refreshAxesScale()
                 isLog = strcmpi(ddScale.Value, 'Log') && any(app.delay > 0);
                 if isLog
@@ -9185,25 +14665,35 @@ classdef TRSpecAnalyzer < handle
                 end
                 xlim(axTrace, xl);
                 xlim(axRes,   xl);
+                % (the plot boxes for the size the panel has now)
+                layoutPlots();
             end
             
             function drawTraceOnly()
                 % Show data only (no fit yet, or before re-fitting).
                 wlReq = edWL.Value;
-                [~, iw] = min(abs(app.wavelength - wlReq));
-                wlActual = app.wavelength(iw);
-                d = app.deltaA(iw, :);
+                [d, ti] = traceNow();
                 app.claAll(axTrace);
-                plot(axTrace, app.delay, d, 'k.', 'MarkerSize', 8, ...
-                    'DisplayName', 'Data');
+                if isempty(ti.err)
+                    plot(axTrace, app.delay, d, 'k.', 'MarkerSize', 8, ...
+                        'DisplayName', 'Data');
+                end
                 yline(axTrace, 0, 'k:', 'HandleVisibility', 'off');
                 grid(axTrace, 'on');
                 xlabel(axTrace, sprintf('Delay time (%s)', app.tUnitAx()));
-                ylabel(axTrace, '\DeltaA or Intensity');
-                title(axTrace, sprintf( ...
-                    'Trace at %s = %.2f %s  (requested %.2f %s)', ...
-                    app.xSym(), wlActual, app.xUnitAx(), wlReq, app.xUnitAx()));
-                legend(axTrace, 'Location', 'best');
+                ylabel(axTrace, app.kinTraceLabel(ti, 'ylabel'));
+                if ~isempty(ti.err)
+                    title(axTrace, ti.err);
+                elseif ti.band
+                    title(axTrace, ['Trace of the ' ...
+                        app.kinTraceLabel(ti, 'at')]);
+                    legend(axTrace, 'Location', 'best');
+                else
+                    title(axTrace, sprintf( ...
+                        'Trace at %s  (requested %.2f %s)', ...
+                        app.kinTraceLabel(ti, 'at'), wlReq, app.xUnitAx()));
+                    legend(axTrace, 'Location', 'best');
+                end
                 cla(axRes);
                 title(axRes, 'Residual (no fit yet)');
                 grid(axRes, 'on');
@@ -9227,11 +14717,18 @@ classdef TRSpecAnalyzer < handle
                 edT0.Value      = app.kfT0;     cbT0fix.Value = app.kfT0Fixed;
                 edFW.Value      = app.kfFWHM;   cbFWfix.Value = app.kfFWHMFixed;
                 ddIRF.Value     = app.kfIRFTreat;
+                wasBand         = logical(cbBand.Value);
+                app.kfBandOn    = false;
+                app.kfBandMode  = 'integral';
+                cbBand.Value    = false;
+                ddBand.Value    = 'integral';
+                setBandEnable();
                 app.kfFitTMin   = [];
                 app.kfFitTMax   = [];
                 setFitTFull();
                 fillTable();
                 onIRFModeChange();
+                if wasBand, drawTraceOnly(); end
                 lblStatus.Text  = 'Reset to defaults.';
                 app.kfSaved = [];
             end
@@ -9272,13 +14769,21 @@ classdef TRSpecAnalyzer < handle
                         'Invalid input');  return;
                 end
                 
-                wlReq = edWL.Value;
-                [~, iw] = min(abs(app.wavelength - wlReq));
-                wlActual = app.wavelength(iw);
-                d = app.deltaA(iw, :);
+                [d, ti] = traceNow();
+                if ~isempty(ti.err)
+                    uialert(f, ti.err, 'No data');  return;
+                end
+                wlActual = ti.wl;
+                iw = ti.iw;
                 if all(~isfinite(d))
-                    uialert(f, 'Trace at this wavelength is all NaN.', ...
-                        'No data');  return;
+                    if ti.band
+                        uialert(f, ['There is no delay at which every ' ...
+                            'wavelength of the band holds data.'], 'No data');
+                    else
+                        uialert(f, 'Trace at this wavelength is all NaN.', ...
+                            'No data');
+                    end
+                    return;
                 end
                 
                 lblStatus.Text = 'Fitting...';
@@ -9309,6 +14814,7 @@ classdef TRSpecAnalyzer < handle
                 
                 lastFit.wlActual  = wlActual;
                 lastFit.iw        = iw;
+                lastFit.info      = ti;
                 lastFit.data      = d(:);
                 lastFit.t         = app.delay(:);
                 lastFit.mask      = info.mask;
@@ -9326,10 +14832,7 @@ classdef TRSpecAnalyzer < handle
                 drawWithFit();
                 
                 % Result text
-                lines = {};
-                lines{end+1} = sprintf('%-11s: %.2f %s', ...
-                    ternary(strcmp(app.specUnit, 'cm-1'), 'Wavenumber', 'Wavelength'), ...
-                    wlActual, app.xUnitTxt());
+                lines = app.kinTraceLabel(ti, 'lines');
                 lines{end+1} = sprintf('Iterations : %d', info.iter);
                 lines{end+1} = sprintf('Final   RMS: %.4g', info.rms);
                 if info.exitFlag <= 0
@@ -9392,6 +14895,9 @@ classdef TRSpecAnalyzer < handle
                 if isfield(info, 'fwhmAtLimit') && info.fwhmAtLimit
                     lines{end+1} = sprintf('IRF FWHM = %.4g %s  [not resolved]', ...
                         fwhmOut, app.tUnitTxt());
+                elseif isfield(info, 'fwhmTooWide') && info.fwhmTooWide
+                    lines{end+1} = sprintf('IRF FWHM = %.4g %s  [not determined by the data]', ...
+                        fwhmOut, app.tUnitTxt());
                 elseif isfield(info, 'fwhmStd') && isfinite(info.fwhmStd)
                     lines{end+1} = sprintf('IRF FWHM = %.4g +/- %.2g %s', ...
                         fwhmOut, info.fwhmStd, app.tUnitTxt());
@@ -9426,10 +14932,16 @@ classdef TRSpecAnalyzer < handle
                 yline(axTrace, 0, 'k:', 'HandleVisibility', 'off');
                 hold(axTrace, 'off');  grid(axTrace, 'on');
                 xlabel(axTrace, sprintf('Delay time (%s)', app.tUnitAx()));
-                ylabel(axTrace, '\DeltaA or Intensity');
-                title(axTrace, sprintf( ...
-                    'Fit at %s = %.2f %s  (RMS = %.3g)', ...
-                    app.xSym(), lastFit.wlActual, app.xUnitAx(), lastFit.rms));
+                fi = fitInfo();
+                yl = app.kinTraceLabel(fi, 'ylabel');
+                ylabel(axTrace, yl);
+                if fi.band
+                    title(axTrace, sprintf('Fit of the %s  (RMS = %.3g)', ...
+                        app.kinTraceLabel(fi, 'at'), lastFit.rms));
+                else
+                    title(axTrace, sprintf('Fit at %s  (RMS = %.3g)', ...
+                        app.kinTraceLabel(fi, 'at'), lastFit.rms));
+                end
                 legend(axTrace, 'Location', 'best');
                 
                 cla(axRes);  hold(axRes, 'on');
@@ -9438,7 +14950,7 @@ classdef TRSpecAnalyzer < handle
                 yline(axRes, 0, 'k:');
                 hold(axRes, 'off');  grid(axRes, 'on');
                 xlabel(axRes, sprintf('Delay time (%s)', app.tUnitAx()));
-                ylabel(axRes, 'Residual (\DeltaA or Intensity)');
+                ylabel(axRes, ['Residual (' yl ')']);
                 title(axRes, sprintf('Residual (RMS = %.3g)', lastFit.rms));
                 refreshAxesScale();
             end
@@ -9455,11 +14967,11 @@ classdef TRSpecAnalyzer < handle
                 % Append a parameter summary as comment-like header rows
                 % via a separate "params" file. To keep things simple,
                 % save just the trace as CSV/DAT.
-                suggested = sprintf('kinfit_%.1f%s.csv', lastFit.wlActual, app.xUnitTxt());
+                fi = fitInfo();
+                suggested = [app.kinTraceLabel(fi, 'file') '.csv'];
                 [file, path] = app.putFile( ...
                     {'*.csv','CSV (*.csv)'; '*.dat','DAT (tab, *.dat)'}, ...
-                    sprintf('Export kinetic fit @ %.2f %s', ...
-                        lastFit.wlActual, app.xUnitTxt()), suggested);
+                    app.kinTraceLabel(fi, 'export'), suggested);
                 if isequal(file, 0), return; end
                 full = fullfile(path, file);
                 [~, ~, ext] = fileparts(full);
@@ -9476,10 +14988,7 @@ classdef TRSpecAnalyzer < handle
                         error('Cannot write %s', paramPath);
                     end
                     fprintf(fid, 'Single-trace kinetic fit\n');
-                    fprintf(fid, '%s: %.4f %s\n', ...
-                        ternary(strcmp(app.specUnit, 'cm-1'), ...
-                            'Wavenumber', 'Wavelength'), ...
-                        lastFit.wlActual, app.xUnitTxt());
+                    fprintf(fid, '%s\n', app.kinTraceLabel(fi, 'param'));
                     fprintf(fid, 'RMS       : %.6g\n\n', lastFit.rms);
                     fprintf(fid, 'Time constants:\n');
                     for ii = 1:numel(lastFit.tau)
@@ -9578,11 +15087,24 @@ classdef TRSpecAnalyzer < handle
             
             % Slice axes and the displayed (corrected) data, then
             % freeze that result as the new baseline.
+            src = app.deltaA;
+            if app.aniOn && ~isempty(app.aniPar)
+                % Anisotropy: the corrected PARALLEL data become the
+                % starting point (with the corrections of an Auto
+                % Analysis run being applied); the perpendicular data
+                % follow through the log.
+                src = app.aniPar;
+                if ~isempty(app.pendingAuto)
+                    src = app.pipeOn(src, app.pendingAuto, app.delay);
+                end
+            end
+            app.logRebase(wlMask, tMask);
             app.wavelength = app.wavelength(wlMask);
             app.delay      = app.delay(tMask);
-            cropped        = app.deltaA(wlMask, tMask);
+            cropped        = src(wlMask, tMask);
             app.deltaA     = cropped;
             app.deltaA_raw = cropped;
+            app.markRebased();
             
             % All prior correction state is now baked into deltaA_raw;
             % clear the flags so recompute() will not re-apply them.
@@ -9706,7 +15228,7 @@ classdef TRSpecAnalyzer < handle
             sigPanel.Layout.Row = 5;
             ggSig = uigridlayout(sigPanel, [1, 1]);
             ggSig.Padding = [4 4 4 4];
-            axSig = uiaxes(ggSig);
+            axSig = app.boxAxes(ggSig, [56 14 8 40]);
             axSig.YScale = 'log';  grid(axSig, 'on');
             xlabel(axSig, 'Component index');
             ylabel(axSig, '\sigma_i');
@@ -9735,7 +15257,7 @@ classdef TRSpecAnalyzer < handle
             pnlU.Layout.Row = 1;  pnlU.Layout.Column = 1;
             ggU = uigridlayout(pnlU, [1, 1]);
             ggU.Padding = [4 4 4 4];
-            axU = uiaxes(ggU);
+            axU = app.boxAxes(ggU, [56 74 8 40]);
             grid(axU, 'on');
             xlabel(axU, app.xAxLabel());  ylabel(axU, 'U_k');
             
@@ -9744,7 +15266,7 @@ classdef TRSpecAnalyzer < handle
             pnlV.Layout.Row = 1;  pnlV.Layout.Column = 2;
             ggV = uigridlayout(pnlV, [1, 1]);
             ggV.Padding = [4 4 4 4];
-            axV = uiaxes(ggV);
+            axV = app.boxAxes(ggV, [56 74 8 40]);
             grid(axV, 'on');
             xlabel(axV, sprintf('Delay time (%s)', app.tUnitAx()));
             ylabel(axV, 'V_k');
@@ -9753,19 +15275,19 @@ classdef TRSpecAnalyzer < handle
             pnlExp.Layout.Row = 2;  pnlExp.Layout.Column = 1;
             ggE = uigridlayout(pnlExp, [1, 1]);
             ggE.Padding = [4 4 4 4];
-            axExp = uiaxes(ggE);
+            axExp = app.boxAxes(ggE, [56 74 8 40]);
             
             pnlRec = uipanel(rgl, 'Title', 'Reconstruction (N components)');
             pnlRec.Layout.Row = 2;  pnlRec.Layout.Column = 2;
             ggR = uigridlayout(pnlRec, [1, 1]);
             ggR.Padding = [4 4 4 4];
-            axRec = uiaxes(ggR);
+            axRec = app.boxAxes(ggR, [56 74 8 40]);
             
             pnlRes = uipanel(rgl, 'Title', 'Residual = original - reconstruction');
             pnlRes.Layout.Row = 3;  pnlRes.Layout.Column = [1 2];
             ggRs = uigridlayout(pnlRes, [1, 1]);
             ggRs.Padding = [4 4 4 4];
-            axRes = uiaxes(ggRs);
+            axRes = app.boxAxes(ggRs, [56 74 8 40]);
             
             % ---------- Compute SVD once on open; refresh views ----------
             % Replace NaN with 0 (option-b policy), keep a mask for info.
@@ -9904,7 +15426,7 @@ classdef TRSpecAnalyzer < handle
                 ylabel(ax, sprintf('Delay time (%s)', app.tUnitAx()));
                 xlim(ax, [min(wlAxis), max(wlAxis)]);
                 applyYScale(ax, tAxis, scaleStr);
-                colorbar(ax);
+                app.boxCbar(ax);
             end
             
             function applyXScale(ax, tAxis, scaleStr)
@@ -10163,39 +15685,36 @@ classdef TRSpecAnalyzer < handle
             rgl.ColumnSpacing = 10;
             
             % Row 1: heatmap + 1D A(tau) at fixed lambda
-            axMap = uiaxes(rgl);
-            axMap.Layout.Row = 1;  axMap.Layout.Column = 1;
+            axMap = app.boxAxes(rgl, [56 74 24 40], 1, 1);
             axMap.YScale = 'log';
             xlabel(axMap, app.xAxLabel());
             ylabel(axMap, sprintf('Lifetime \\tau (%s)', app.tUnitAx()));
             title(axMap, 'Amplitude density A(\lambda, \tau)');
             
-            ax1D = uiaxes(rgl);
-            ax1D.Layout.Row = 1;  ax1D.Layout.Column = 2;
+            ax1D = app.boxAxes(rgl, [56 14 24 40], 1, 2);
             xlabel(ax1D, sprintf('Lifetime \\tau (%s)', app.tUnitAx()));
             ylabel(ax1D, 'Amplitude');
             title(ax1D, 'Click on the map to see A(\tau)');
             grid(ax1D, 'on');
             ax1D.XScale = 'log';
             
-            % Row 2: spectrum slice (left) + reconstruction (right)
-            axSpec = uiaxes(rgl);
-            axSpec.Layout.Row = 2;  axSpec.Layout.Column = 1;
+            % Row 2: spectrum slice (left) + reconstruction (right).
+            % The slice has the wavelength axis of the map above it and
+            % therefore its width: the room of the color bar stays free.
+            axSpec = app.boxAxes(rgl, [56 74 24 40], 2, 1);
             xlabel(axSpec, app.xAxLabel());
             ylabel(axSpec, 'Amplitude');
             title(axSpec, 'Spectrum at clicked \tau');
             grid(axSpec, 'on');
             
-            axKin = uiaxes(rgl);
-            axKin.Layout.Row = 2;  axKin.Layout.Column = 2;
+            axKin = app.boxAxes(rgl, [56 14 24 40], 2, 2);
             xlabel(axKin, sprintf('Delay time (%s)', app.tUnitAx()));
-            ylabel(axKin, '\DeltaA or Intensity');
+            ylabel(axKin, app.sigName());
             title(axKin, 'Reconstruction at clicked \lambda');
             grid(axKin, 'on');
             
             % Row 3: L-curve (full width)
-            axL = uiaxes(rgl);
-            axL.Layout.Row = 3;  axL.Layout.Column = [1 2];
+            axL = app.boxAxes(rgl, [56 14 24 40], 3, [1 2]);
             xlabel(axL, '||residual||');
             ylabel(axL, '||solution||');
             title(axL, 'L-curve (run "L-curve..." to populate)');
@@ -10363,8 +15882,8 @@ classdef TRSpecAnalyzer < handle
                 title(axMap, sprintf( ...
                     ['Amplitude density A(\\lambda, \\tau)   ' ...
                      '\\alpha=%.3g'], ldaResult.alpha));
-                cb = colorbar(axMap);
-                cb.Label.String = '\DeltaA or Intensity  amplitude';
+                cb = app.boxCbar(axMap);
+                cb.Label.String = [app.sigName() '  amplitude'];
                 
                 % Crosshair (initialize to map center if no click yet).
                 if ~isfinite(curLambda)
@@ -10485,7 +16004,7 @@ classdef TRSpecAnalyzer < handle
                 yline(axKin, 0, 'k:', 'HandleVisibility', 'off');
                 hold(axKin, 'off');  grid(axKin, 'on');
                 xlabel(axKin, sprintf('Delay time (%s)', app.tUnitAx()));
-                ylabel(axKin, '\DeltaA or Intensity');
+                ylabel(axKin, app.sigName());
                 if any(app.delay > 0)
                     set(axKin, 'XScale', 'log');
                     xlK = [min(app.delay(app.delay > 0)), ...
@@ -10812,29 +16331,25 @@ classdef TRSpecAnalyzer < handle
             rgl.Padding     = [8 8 8 8];  rgl.RowSpacing = 8;
             rgl.ColumnSpacing = 10;
             
-            axC = uiaxes(rgl);
-            axC.Layout.Row = 1;  axC.Layout.Column = 1;
+            axC = app.boxAxes(rgl, [56 14 24 40], 1, 1);
             xlabel(axC, sprintf('Delay time (%s)', app.tUnitAx()));
             ylabel(axC, 'Concentration');
             title(axC, 'C profiles (concentration vs time)');
             grid(axC, 'on');
             
-            axS = uiaxes(rgl);
-            axS.Layout.Row = 1;  axS.Layout.Column = 2;
+            axS = app.boxAxes(rgl, [56 14 24 40], 1, 2);
             xlabel(axS, app.xAxLabel());
-            ylabel(axS, 'Pure spectrum (\DeltaA or Intensity)');
+            ylabel(axS, ['Pure spectrum (' app.sigName() ')']);
             title(axS, 'S spectra');
             grid(axS, 'on');
             
-            axRec = uiaxes(rgl);
-            axRec.Layout.Row = 2;  axRec.Layout.Column = 1;
+            axRec = app.boxAxes(rgl, [56 14 24 40], 2, 1);
             xlabel(axRec, sprintf('Delay time (%s)', app.tUnitAx()));
-            ylabel(axRec, '\DeltaA or Intensity');
+            ylabel(axRec, app.sigName());
             title(axRec, 'Reconstruction at clicked \lambda');
             grid(axRec, 'on');
             
-            axConv = uiaxes(rgl);
-            axConv.Layout.Row = 2;  axConv.Layout.Column = 2;
+            axConv = app.boxAxes(rgl, [56 14 24 40], 2, 2);
             xlabel(axConv, 'ALS iteration');
             ylabel(axConv, 'LOF (%)');
             title(axConv, 'Convergence');
@@ -11103,7 +16618,7 @@ classdef TRSpecAnalyzer < handle
                 end
                 hold(axS, 'off');
                 xlabel(axS, app.xAxLabel());
-                ylabel(axS, 'Pure spectrum (\DeltaA or Intensity)');
+                ylabel(axS, ['Pure spectrum (' app.sigName() ')']);
                 title(axS, 'S spectra');
                 xlim(axS, [min(wl), max(wl)]);
                 legend(axS, 'Location', 'best', 'FontSize', 8);
@@ -11181,7 +16696,7 @@ classdef TRSpecAnalyzer < handle
                 yline(axRec, 0, 'k:', 'HandleVisibility', 'off');
                 hold(axRec, 'off');
                 xlabel(axRec, sprintf('Delay time (%s)', app.tUnitAx()));
-                ylabel(axRec, '\DeltaA or Intensity');
+                ylabel(axRec, app.sigName());
                 title(axRec, sprintf( ...
                     'Reconstruction at %s = %.2f %s', ...
                     app.xSym(), wlAct, app.xUnitAx()));
@@ -11311,16 +16826,16 @@ classdef TRSpecAnalyzer < handle
             % ============== Left: setup ==============
             left = uipanel(gl, 'Title', 'Coherence setup');
             left.Layout.Column = 1;
-            lgl = uigridlayout(left, [26, 1]);
-            % rows: residualLbl, residRow, NexpRow, twindowLbl, tMinRow,
-            %       tMaxRow, fftLbl, apodRow, zpadRow, detrendRow,
+            lgl = uigridlayout(left, [24, 1]);
+            % rows: residualLbl, residRow, NexpRow, solventRow,
+            %       twindowLbl, tRow, fftLbl, apodRow, zpadRow, detrendRow,
             %       freqLbl, freqUnitRow, normRow, yScaleRow,
-            %       avgLbl, avgMinRow, avgMaxRow,
-            %       dispLbl, dispMinRow, dispMaxRow,
+            %       avgLbl, avgRow, dispLbl, dispRow,
             %       btnRow, tfBtnRow, expLbl, expRow, statusLbl, resultArea
-            lgl.RowHeight = {22, 30, 30, 22, 30, 30, 22, 30, 30, 30, ...
-                             22, 30, 30, 30, 22, 30, 30, ...
-                             22, 30, 30, ...
+            % (the two limits of a range share one row: the panel has to
+            %  fit a screen 860 pixels high)
+            lgl.RowHeight = {22, 30, 30, 30, 22, 30, 22, 30, 30, 30, ...
+                             22, 30, 30, 30, 22, 30, 22, 30, ...
                              32, 30, 22, 30, 22, '1x'};
             lgl.Padding = [8 8 8 8];  lgl.RowSpacing = 6;
             
@@ -11344,18 +16859,25 @@ classdef TRSpecAnalyzer < handle
                 'Tooltip', ['Number of exponentials fitted at every ' ...
                     'wavelength. Used by "Per-pixel exp fit" only.']);
             
-            % --- Time window ---
-            uilabel(lgl, 'Text', 'Time window:', 'FontWeight', 'bold');
+            % --- Solvent coherence ---
             row = uigridlayout(lgl, [1, 2]);
             row.ColumnWidth = {'fit', '1x'};
+            row.Padding = [0 0 0 0];  row.ColumnSpacing = 6;
+            uibutton(row, 'Text', 'Solvent coherence...', ...
+                'Tooltip', ['Take the vibrational coherence of the solvent, ' ...
+                    'measured alone, out of the residual before the FFT.'], ...
+                'ButtonPushedFcn', @(~,~) safeCb(@openSolventDialog, ...
+                    'Solvent coherence'));
+            lblSolv = uilabel(row, 'Text', '', 'FontColor', [0.25 0.25 0.25]);
+            
+            % --- Time window ---
+            uilabel(lgl, 'Text', 'Time window:', 'FontWeight', 'bold');
+            row = uigridlayout(lgl, [1, 4]);
+            row.ColumnWidth = {'fit', '1x', 'fit', '1x'};
             row.Padding = [0 0 0 0];  row.ColumnSpacing = 6;
             uilabel(row, 'Text', sprintf('t_min (%s):', app.tUnitTxt()));
             edTMin = uieditfield(row, 'numeric', ...
                 'Value', defaultTMin());
-            
-            row = uigridlayout(lgl, [1, 2]);
-            row.ColumnWidth = {'fit', '1x'};
-            row.Padding = [0 0 0 0];  row.ColumnSpacing = 6;
             uilabel(row, 'Text', sprintf('t_max (%s):', app.tUnitTxt()));
             edTMax = uieditfield(row, 'numeric', ...
                 'Value', defaultTMax());
@@ -11425,17 +16947,13 @@ classdef TRSpecAnalyzer < handle
             uilabel(lgl, 'Text', app.uiStr('Average power over \lambda range:'), ...
                 'FontWeight', 'bold');
             wlLo0 = min(app.wavelength);  wlHi0 = max(app.wavelength);
-            row = uigridlayout(lgl, [1, 2]);
-            row.ColumnWidth = {'fit', '1x'};
+            row = uigridlayout(lgl, [1, 4]);
+            row.ColumnWidth = {'fit', '1x', 'fit', '1x'};
             row.Padding = [0 0 0 0];  row.ColumnSpacing = 6;
             uilabel(row, 'Text', sprintf('%s_min (%s):', app.xSymTxt(), app.xUnitTxt()));
             edAvgWLmin = uieditfield(row, 'numeric', 'Value', wlLo0, ...
                 'Limits', [wlLo0, wlHi0], ...
                 'ValueChangedFcn', @(~,~) onAvgRangeChange());
-            
-            row = uigridlayout(lgl, [1, 2]);
-            row.ColumnWidth = {'fit', '1x'};
-            row.Padding = [0 0 0 0];  row.ColumnSpacing = 6;
             uilabel(row, 'Text', sprintf('%s_max (%s):', app.xSymTxt(), app.xUnitTxt()));
             edAvgWLmax = uieditfield(row, 'numeric', 'Value', wlHi0, ...
                 'Limits', [wlLo0, wlHi0], ...
@@ -11447,16 +16965,12 @@ classdef TRSpecAnalyzer < handle
             %     ranges are clipped.)
             uilabel(lgl, 'Text', app.uiStr('Display \nu range:'), ...
                 'FontWeight', 'bold');
-            row = uigridlayout(lgl, [1, 2]);
-            row.ColumnWidth = {'fit', '1x'};
+            row = uigridlayout(lgl, [1, 4]);
+            row.ColumnWidth = {'fit', '1x', 'fit', '1x'};
             row.Padding = [0 0 0 0];  row.ColumnSpacing = 6;
             uilabel(row, 'Text', app.uiStr('\nu_min:'));
             edDispVmin = uieditfield(row, 'numeric', 'Value', 0, ...
                 'ValueChangedFcn', @(~,~) onDispRangeChange());
-            
-            row = uigridlayout(lgl, [1, 2]);
-            row.ColumnWidth = {'fit', '1x'};
-            row.Padding = [0 0 0 0];  row.ColumnSpacing = 6;
             uilabel(row, 'Text', app.uiStr('\nu_max:'));
             edDispVmax = uieditfield(row, 'numeric', 'Value', 0, ...
                 'Tooltip', app.uiStr(['Visualization window on the wavenumber ' ...
@@ -11506,15 +17020,62 @@ classdef TRSpecAnalyzer < handle
             % ============== Right: plots ==============
             right = uipanel(gl, 'Title', 'Results');
             right.Layout.Column = 2;
-            rgl = uigridlayout(right, [2, 2]);
+            rgl = uigridlayout(right, [3, 2]);
             rgl.ColumnWidth = {'1x', '1x'};
-            rgl.RowHeight   = {'1.3x', '1x'};
+            rgl.RowHeight   = {26, '1.3x', '1x'};
             rgl.Padding     = [8 8 8 8];  rgl.RowSpacing = 8;
             rgl.ColumnSpacing = 10;
             
+            % Bar above the plots: the color range of the map; with a
+            % solvent subtraction, what is compared with what (these
+            % controls are shown only then).
+            barC = uigridlayout(rgl, [1, 10]);
+            barC.Layout.Row = 1;  barC.Layout.Column = [1 2];
+            barC.ColumnWidth = {'fit', 80, 'fit', 80, 52, 10, 'fit', 150, ...
+                                'fit', 110};
+            barC.Padding = [0 0 0 0];  barC.ColumnSpacing = 6;
+            zTip = app.uiStr(['Color range of the |FFT|^2 map, in the units ' ...
+                'of the map (also with the log scale). Type a value to fix ' ...
+                'the range, for instance a small maximum to bring out weak ' ...
+                'modes; "Auto" returns to the automatic range.']);
+            lblZ = uilabel(barC, 'Text', 'Color range:', 'Enable', 'off');
+            edZmin = uieditfield(barC, 'numeric', 'Value', 0, ...
+                'Enable', 'off', 'Tooltip', zTip, ...
+                'ValueChangedFcn', @(~,~) safeCb(@onZRange, 'Color range'));
+            uilabel(barC, 'Text', 'to');
+            edZmax = uieditfield(barC, 'numeric', 'Value', 1, ...
+                'Enable', 'off', 'Tooltip', zTip, ...
+                'ValueChangedFcn', @(~,~) safeCb(@onZRange, 'Color range'));
+            btnZAuto = uibutton(barC, 'Text', 'Auto', 'Enable', 'off', ...
+                'Tooltip', app.uiStr(['Back to the automatic color range: ' ...
+                    'up to the largest value of the map in the displayed ' ...
+                    '\nu range.']), ...
+                'ButtonPushedFcn', @(~,~) safeCb(@onZAuto, 'Color range'));
+            uilabel(barC, 'Text', '');
+            lblShow = uilabel(barC, 'Text', 'Map shows:', 'Visible', 'off');
+            ddShow = uidropdown(barC, ...
+                'Items', {'After subtraction', 'Before subtraction'}, ...
+                'ItemsData', {'after', 'before'}, ...
+                'Value', 'after', 'Visible', 'off', ...
+                'Tooltip', ['The map after or before the solvent coherence ' ...
+                    'was taken out. Both are in the same units (those of ' ...
+                    'the map after the subtraction).'], ...
+                'ValueChangedFcn', @(~,~) safeCb(@onShowChange, 'Map shows'));
+            cbGray = uicheckbox(barC, 'Text', '"Before" in gray', ...
+                'Value', true, 'Visible', 'off', ...
+                'Tooltip', ['Draw the curves before the solvent subtraction ' ...
+                    'in gray behind those after it, in the four plots at ' ...
+                    'the right and below.'], ...
+                'ValueChangedFcn', @(~,~) safeCb(@onGrayChange, 'Before in gray'));
+            btnCmp = uibutton(barC, 'Text', 'Side by side...', ...
+                'Visible', 'off', ...
+                'Tooltip', ['Open a window with the map before and the map ' ...
+                    'after the solvent subtraction side by side, on one ' ...
+                    'color scale.'], ...
+                'ButtonPushedFcn', @(~,~) safeCb(@openCompare, 'Side by side'));
+            
             % Heatmap (large) + 1D power spectrum at lambda
-            axMap = uiaxes(rgl);
-            axMap.Layout.Row = 1;  axMap.Layout.Column = 1;
+            axMap = app.boxAxes(rgl, [56 74 24 40], 2, 1);
             xlabel(axMap, freqAxLabel('cm-1'));
             ylabel(axMap, app.xAxLabel());
             title(axMap, '|FFT|^2 map');
@@ -11530,56 +17091,67 @@ classdef TRSpecAnalyzer < handle
             % Power spectrum panel: split top (at clicked lambda) and
             % bottom (averaged over a user-set wavelength range).
             pspecPnl = uigridlayout(rgl, [2, 1]);
-            pspecPnl.Layout.Row = 1;  pspecPnl.Layout.Column = 2;
+            pspecPnl.Layout.Row = 2;  pspecPnl.Layout.Column = 2;
             pspecPnl.RowHeight = {'1x', '1x'};
             pspecPnl.Padding = [0 0 0 0];  pspecPnl.RowSpacing = 4;
             
-            axPSpec = uiaxes(pspecPnl);
-            axPSpec.Layout.Row = 1;
+            % (the five plots without a color bar do not leave the room
+            % of the bar of the map free: the room right of them is that
+            % of every plot without a bar)
+            axPSpec = app.boxAxes(pspecPnl, [56 14 24 8], 1);
             xlabel(axPSpec, '');                  % shared x with avg below
+            axPSpec.XTickLabel = [];
             ylabel(axPSpec, '|FFT|^2');
             title(axPSpec, 'Power spectrum at clicked \lambda');
             grid(axPSpec, 'on');
             
-            axPSpecAvg = uiaxes(pspecPnl);
-            axPSpecAvg.Layout.Row = 2;
+            axPSpecAvg = app.boxAxes(pspecPnl, [56 14 24 40], 2);
             xlabel(axPSpecAvg, freqAxLabel('cm-1'));
             ylabel(axPSpecAvg, '|FFT|^2');
             title(axPSpecAvg, 'Average over \lambda range');
             grid(axPSpecAvg, 'on');
             
             % Profile at fixed wavenumber: split top (|FFT|^2) and
-            % bottom (phase). The sub-grid takes the (Row 2, Col 1) cell
-            % of the parent rgl that originally held a single axProf.
+            % bottom (phase). The sub-grid takes the lower left cell of
+            % the parent rgl that originally held a single axProf.
             profPnl = uigridlayout(rgl, [2, 1]);
-            profPnl.Layout.Row = 2;  profPnl.Layout.Column = 1;
+            profPnl.Layout.Row = 3;  profPnl.Layout.Column = 1;
             profPnl.RowHeight = {'1x', '1x'};
             profPnl.Padding = [0 0 0 0];  profPnl.RowSpacing = 4;
             
-            axProf = uiaxes(profPnl);
-            axProf.Layout.Row = 1;
+            axProf = app.boxAxes(profPnl, [56 14 24 8], 1);
             xlabel(axProf, '');                  % shared x with phase below
+            axProf.XTickLabel = [];
             ylabel(axProf, '|FFT|^2');
             title(axProf, 'Spectral profile at clicked \nu');
             grid(axProf, 'on');
             
-            axProfPh = uiaxes(profPnl);
-            axProfPh.Layout.Row = 2;
+            axProfPh = app.boxAxes(profPnl, [56 14 8 40], 2);
             xlabel(axProfPh, app.xAxLabel());
             ylabel(axProfPh, 'Phase (rad)');
             grid(axProfPh, 'on');
             
-            axRes = uiaxes(rgl);
-            axRes.Layout.Row = 2;  axRes.Layout.Column = 2;
+            axRes = app.boxAxes(rgl, [56 14 24 40], 3, 2);
             xlabel(axRes, sprintf('Delay time (%s)', app.tUnitAx()));
             ylabel(axRes, 'Residual');
             title(axRes, 'Residual time trace at clicked \lambda');
             grid(axRes, 'on');
             
             % ---- State ----
+            % before: the result before the solvent subtraction (Pmap in
+            % the units of the map after it, RinWin, Phimap); [] if
+            % nothing was subtracted.
             cohResult = struct('Pmap', [], 'freq', [], ...
                 'Rresid', [], 'tWin', [], ...
-                'info', struct());
+                'info', struct(), 'before', []);
+            zManual   = [];      % color range set by hand: [lo hi]
+            zUsed     = [0 1];   % color range of the map as drawn
+            % the side-by-side window (before | after)
+            cmpFig    = [];
+            cmpH      = struct('lines', []);   % its controls and axes
+            cmpZ      = [];      % its color range set by hand
+            cmpZUsed  = [0 1];
+            cmpBar    = [0.03 0.13 0.12 0.80];   % its color bar, in its cell
             curLambda = app.selWL;
             curFreq   = NaN;
             xhV       = [];   % vertical crosshair on heatmap (freq)
@@ -11588,6 +17160,8 @@ classdef TRSpecAnalyzer < handle
             yhAvgHi   = [];   % heatmap horizontal line: avg lambda_max
             draggingC = false; % coherence heatmap drag state
             cohDragTimer = []; % polling timer used as drag safety net
+            % residual of the per-pixel fit, kept until its settings change
+            residCache = struct('key', '', 'R', [], 'note', '');
             
             % ---- Wire up ----
             btnRun.ButtonPushedFcn   = @(~,~) safeCb(@doRun, 'Run Coherence');
@@ -11618,7 +17192,25 @@ classdef TRSpecAnalyzer < handle
                     ddNorm.Value   = st.norm;    ddYScale.Value = st.yscale;
                     edAvgWLmin.Value = st.avgLo; edAvgWLmax.Value = st.avgHi;
                     edDispVmin.Value = st.dispLo; edDispVmax.Value = st.dispHi;
+                    % (settings of version 1.1.0: absent in older sessions)
+                    if isfield(st, 'zLo') && isfield(st, 'zHi') && ...
+                            isnumeric(st.zLo) && isscalar(st.zLo) && ...
+                            isnumeric(st.zHi) && isscalar(st.zHi) && ...
+                            isfinite(st.zLo) && isfinite(st.zHi) && ...
+                            st.zHi > st.zLo
+                        zManual = double([st.zLo, st.zHi]);
+                    end
+                    if isfield(st, 'mapShows') && ...
+                            any(strcmp(st.mapShows, {'after', 'before'}))
+                        ddShow.Value = st.mapShows;
+                    end
+                    if isfield(st, 'grayBefore') && isscalar(st.grayBefore)
+                        cbGray.Value = logical(st.grayBefore);
+                    end
                     cohResult = app.cohSaved.result;
+                    if ~isfield(cohResult, 'before')
+                        cohResult.before = [];
+                    end
                     curLambda = app.cohSaved.curLambda;
                     curFreq   = app.cohSaved.curFreq;
                     btnExpMap.Enable  = 'on';
@@ -11637,6 +17229,8 @@ classdef TRSpecAnalyzer < handle
                 end
             end
             syncNexpEnable();
+            updateSolvLabel();
+            syncBar();
             
             function syncNexpEnable()
                 % "Per-pixel N exp" belongs to the per-pixel fit only;
@@ -11672,6 +17266,7 @@ classdef TRSpecAnalyzer < handle
                     yhAvgHi.Value = edAvgWLmax.Value;
                 end
                 update1Ds();
+                refreshCompare(false);
             end
             
             function onDispRangeChange()
@@ -11681,31 +17276,14 @@ classdef TRSpecAnalyzer < handle
                 % the data inside the visible wavenumber band, so that
                 % zooming into a quieter region brings its small modes
                 % into the full color range automatically.
+                % (A color range set by hand stays as it is.)
                 if isempty(cohResult.Pmap), return; end
                 lims = getDispLims();
                 if isempty(lims), return; end
-                try, xlim(axMap,      lims); catch, end
+                plotMap();
                 try, xlim(axPSpec,    lims); catch, end
                 try, xlim(axPSpecAvg, lims); catch, end
-                
-                freq = cohResult.freq;
-                fMask = freq >= lims(1) & freq <= lims(2);
-                if any(fMask)
-                    sub = cohResult.Pmap(:, fMask);
-                    if strcmp(ddYScale.Value, 'log')
-                        pkSub = max(sub(:), [], 'omitnan');
-                        if ~isfinite(pkSub) || pkSub <= 0, pkSub = 1; end
-                        floorVal = pkSub * 1e-4;   % 4-decade range
-                        try
-                            axMap.CLim = [log10(floorVal), log10(pkSub)];
-                        catch
-                        end
-                    else
-                        cl = max(sub(:), [], 'omitnan');
-                        if ~isfinite(cl) || cl <= 0, cl = 1; end
-                        try, axMap.CLim = [0, cl]; catch, end
-                    end
-                end
+                refreshCompare(false);
             end
             
             function lims = getDispLims()
@@ -11750,6 +17328,416 @@ classdef TRSpecAnalyzer < handle
                 end
             end
             
+            % ============== The bar above the plots ==============
+            function tf = hasBefore()
+                % Is there a result from before the solvent subtraction?
+                tf = ~isempty(cohResult.Pmap) && ...
+                    isfield(cohResult, 'before') && ...
+                    isstruct(cohResult.before) && ...
+                    isfield(cohResult.before, 'Pmap') && ...
+                    ~isempty(cohResult.before.Pmap);
+            end
+            
+            function tf = showBefore()
+                % Does the map show the result before the subtraction?
+                tf = hasBefore() && strcmp(ddShow.Value, 'before');
+            end
+            
+            function tf = grayOn()
+                tf = hasBefore() && logical(cbGray.Value);
+            end
+            
+            function P = mapShown()
+                % The |FFT|^2 map on display.
+                if showBefore()
+                    P = cohResult.before.Pmap;
+                else
+                    P = cohResult.Pmap;
+                end
+            end
+            
+            function tf = zRangeOk(lo, hi)
+                % Is [lo hi] a usable color range (with the scale chosen)?
+                tf = isfinite(lo) && isfinite(hi) && hi > lo && ...
+                    (~strcmp(ddYScale.Value, 'log') || hi > 0);
+            end
+            
+            function [cLo, cHi, zLo, zHi] = colorLims(P, zm)
+                % Color limits of an |FFT|^2 map. zLo, zHi are the limits
+                % in the units of the map; cLo, cHi those of what is drawn
+                % (log10 of them with the log scale).
+                % Automatic: from 0 (log: four decades below the top) to
+                % the largest value in the displayed nu range. zm = [lo hi]
+                % is a range set by hand (log: a lower limit <= 0 is
+                % replaced by four decades below the upper one).
+                logS = strcmp(ddYScale.Value, 'log');
+                fr   = cohResult.freq(:).';
+                lims = getDispLims();
+                Psub = P;
+                if ~isempty(lims)
+                    fm = fr >= lims(1) & fr <= lims(2);
+                    if any(fm), Psub = P(:, fm); end
+                end
+                pk = max(Psub(:), [], 'omitnan');
+                if isempty(pk) || ~isfinite(pk) || pk <= 0, pk = 1; end
+                if numel(zm) == 2 && zRangeOk(zm(1), zm(2))
+                    zLo = zm(1);  zHi = zm(2);
+                    if logS && zLo <= 0, zLo = zHi * 1e-4; end
+                elseif logS
+                    zLo = pk * 1e-4;  zHi = pk;
+                else
+                    zLo = 0;  zHi = pk;
+                end
+                if logS
+                    cLo = log10(zLo);  cHi = log10(zHi);
+                else
+                    cLo = zLo;  cHi = zHi;
+                end
+            end
+            
+            function syncBar()
+                % The bar follows the result: the color range needs a map,
+                % the comparison a result from before the solvent
+                % subtraction.
+                has = ~isempty(cohResult.Pmap);
+                oo  = app.pick(has, 'on', 'off');
+                lblZ.Enable = oo;  edZmin.Enable = oo;  edZmax.Enable = oo;
+                btnZAuto.Enable = app.pick(has && ~isempty(zManual), 'on', 'off');
+                vv = app.pick(hasBefore(), 'on', 'off');
+                lblShow.Visible = vv;  ddShow.Visible = vv;
+                cbGray.Visible  = vv;  btnCmp.Visible = vv;
+                if ~hasBefore()
+                    ddShow.Value = 'after';
+                    closeCompare();
+                end
+            end
+            
+            function saveView()
+                % Keep what the bar says with the stored result.
+                if isempty(app.cohSaved) || ~isstruct(app.cohSaved) || ...
+                        ~isfield(app.cohSaved, 'settings')
+                    return;
+                end
+                if numel(zManual) == 2
+                    app.cohSaved.settings.zLo = zManual(1);
+                    app.cohSaved.settings.zHi = zManual(2);
+                else
+                    app.cohSaved.settings.zLo = NaN;
+                    app.cohSaved.settings.zHi = NaN;
+                end
+                app.cohSaved.settings.mapShows   = ddShow.Value;
+                app.cohSaved.settings.grayBefore = logical(cbGray.Value);
+            end
+            
+            function onZRange()
+                % A limit of the color range was typed.
+                if isempty(cohResult.Pmap), return; end
+                lo = edZmin.Value;  hi = edZmax.Value;
+                if ~zRangeOk(lo, hi)
+                    edZmin.Value = zUsed(1);  edZmax.Value = zUsed(2);
+                    lblStatus.Text = ['Color range: the maximum has to be ' ...
+                        'larger than the minimum' ...
+                        app.pick(strcmp(ddYScale.Value, 'log'), ...
+                        ' and positive', '') '.'];
+                    return;
+                end
+                zManual = [lo, hi];
+                plotMap();
+                saveView();
+            end
+            
+            function onZAuto()
+                zManual = [];
+                if ~isempty(cohResult.Pmap), plotMap(); end
+                syncBar();
+                saveView();
+            end
+            
+            function onShowChange()
+                if ~isempty(cohResult.Pmap), plotMap(); end
+                saveView();
+            end
+            
+            function onGrayChange()
+                if ~isempty(cohResult.Pmap), update1Ds(); end
+                saveView();
+            end
+            
+            function twoLegend(ax, hB, hA)
+                % Legend "before / after" of a curve plot (none without
+                % the gray curve).
+                if isempty(hB) || isempty(hA)
+                    legend(ax, 'off');
+                else
+                    legend(ax, [hB, hA], 'Location', 'best', ...
+                        'AutoUpdate', 'off');
+                end
+            end
+            
+            % ============== Before | after, side by side ==============
+            function openCompare()
+                % The map before and the map after the solvent subtraction
+                % side by side on one color scale, with the two power
+                % spectra laid over each other. The window shows the
+                % result of this one and follows it: cursor, displayed nu
+                % range, lambda range of the average, scale.
+                if ~hasBefore(), return; end
+                if ~isempty(cmpFig) && isvalid(cmpFig)
+                    figure(cmpFig);  return;
+                end
+                cmpFig = uifigure('Name', ...
+                    'Coherence: before / after the solvent subtraction', ...
+                    'Position', app.fitFigurePosition(1180, 760));
+                app.applyLightTheme(cmpFig);
+                cmpFig.CloseRequestFcn = @(~,~) closeCompare();
+                % The controls, the maps and the spectra are placed by
+                % hand (layoutCompare): the plot box of a spectrum has
+                % the left and the right edge of the map above it, so
+                % that a frequency is at the same place in both. In a
+                % grid every axes gives its plot box the room its own
+                % labels leave, and the boxes of a column differ.
+                try, cmpFig.AutoResizeChildren = 'off'; catch, end
+                cmpH.pTop = uipanel(cmpFig, 'BorderType', 'none');
+                
+                cbr = uigridlayout(cmpH.pTop, [1, 6]);
+                cbr.ColumnWidth = {'fit', 80, 'fit', 80, 52, '1x'};
+                cbr.Padding = [0 0 0 0];  cbr.ColumnSpacing = 6;
+                zTipC = ['Color range of both maps, in the units of the ' ...
+                    'map of the Coherence window. Type a value to fix the ' ...
+                    'range; "Auto" returns to the automatic range.'];
+                uilabel(cbr, 'Text', 'Color range (both maps):');
+                cmpH.edZmin = uieditfield(cbr, 'numeric', 'Value', 0, ...
+                    'Tooltip', zTipC, ...
+                    'ValueChangedFcn', @(~,~) safeCb(@onCmpZRange, 'Color range'));
+                uilabel(cbr, 'Text', 'to');
+                cmpH.edZmax = uieditfield(cbr, 'numeric', 'Value', 1, ...
+                    'Tooltip', zTipC, ...
+                    'ValueChangedFcn', @(~,~) safeCb(@onCmpZRange, 'Color range'));
+                cmpH.btnAuto = uibutton(cbr, 'Text', 'Auto', 'Enable', 'off', ...
+                    'Tooltip', app.uiStr(['Back to the automatic color ' ...
+                        'range: up to the largest value of the two maps in ' ...
+                        'the displayed \nu range.']), ...
+                    'ButtonPushedFcn', @(~,~) safeCb(@onCmpZAuto, 'Color range'));
+                cmpH.lblNote = uilabel(cbr, 'Text', ['Follows the Coherence ' ...
+                    'window. A click on a map moves the cursor there.'], ...
+                    'FontColor', [0.25 0.25 0.25]);
+                
+                % the two maps, the two spectra and a cell for the one
+                % color bar
+                cmpH.pPlot = uipanel(cmpFig, 'BorderType', 'none');
+                try, cmpH.pPlot.AutoResizeChildren = 'off'; catch, end
+                cmpH.axB = uiaxes(cmpH.pPlot);
+                cmpH.axA = uiaxes(cmpH.pPlot);
+                cmpH.axS = uiaxes(cmpH.pPlot);
+                cmpH.axV = uiaxes(cmpH.pPlot);
+                cmpH.cHost = app.newCbarHost(cmpH.pPlot);
+                cmpH.lines = [];
+                cmpZ = [];  cmpZUsed = [0 1];
+                layoutCompare();
+                cmpFig.SizeChangedFcn = @(~,~) layoutCompare();
+                refreshCompare(false);
+            end
+            
+            function layoutCompare()
+                % Places the controls, the two maps, the two spectra and
+                % the color bar for the present size of the side-by-side
+                % window (app.sideBySideBoxes): when the window is made,
+                % and whenever its size changes.
+                if isempty(cmpFig) || ~isvalid(cmpFig), return; end
+                try
+                    figPos = cmpFig.Position;
+                    lay = app.sideBySideBoxes(figPos(3), figPos(4));
+                    cmpH.pTop.Position  = lay.top;
+                    cmpH.pPlot.Position = lay.plot;
+                    cmpH.axB = boxAt(cmpH.axB, lay.mapB);
+                    cmpH.axA = boxAt(cmpH.axA, lay.mapA);
+                    cmpH.axS = boxAt(cmpH.axS, lay.specS);
+                    cmpH.axV = boxAt(cmpH.axV, lay.specV);
+                    cmpH.cHost.Parent.Position = lay.host;
+                    cmpBar = lay.bar;
+                    if ~isempty(cmpH.lines)
+                        % (the maps are drawn: the bar is there)
+                        app.placeCbar(app.hostCbar(cmpH.cHost), ...
+                            cmpBar(1:2), cmpBar(3:4));
+                    end
+                catch
+                    % the window stays as it is
+                end
+            end
+            
+            function ax = boxAt(ax, rect)
+                % The plot box of ax at rect = [left bottom width height],
+                % in pixels of its panel. It stays there whatever the
+                % tick labels, the axis labels and the title need: these
+                % are outside the box.
+                ax.Units = 'pixels';
+                ax.PositionConstraint = 'innerposition';
+                ax.InnerPosition = rect;
+            end
+            
+            function closeCompare()
+                if ~isempty(cmpFig) && isvalid(cmpFig)
+                    delete(cmpFig);
+                end
+                cmpFig = [];
+                cmpH   = struct('lines', []);
+            end
+            
+            function refreshCompare(cursorOnly)
+                % The side-by-side window follows this one. cursorOnly:
+                % the cursor moved, the maps stay as they are.
+                if isempty(cmpFig) || ~isvalid(cmpFig), return; end
+                if ~hasBefore()
+                    closeCompare();  return;
+                end
+                if cursorOnly && numel(cmpH.lines) == 4 && ...
+                        all(isvalid(cmpH.lines))
+                    cmpH.lines(1).Value = curFreq;
+                    cmpH.lines(2).Value = curLambda;
+                    cmpH.lines(3).Value = curFreq;
+                    cmpH.lines(4).Value = curLambda;
+                else
+                    plotCmpMaps();
+                end
+                plotCmpSpectra();
+            end
+            
+            function plotCmpMaps()
+                wl   = app.wavelength(:).';
+                freq = cohResult.freq(:).';
+                Pa   = cohResult.Pmap;
+                Pb   = cohResult.before.Pmap;
+                logS = strcmp(ddYScale.Value, 'log');
+                % one scale for both maps: neither is cut off
+                [cLo, cHi, zLo, zHi] = colorLims(max(Pa, Pb), cmpZ);
+                cmpZUsed = [zLo, zHi];
+                cmpH.edZmin.Value = zLo;  cmpH.edZmax.Value = zHi;
+                cmpH.btnAuto.Enable = app.pick(numel(cmpZ) == 2, 'on', 'off');
+                cmap = turboMap(256);
+                [F, W] = meshgrid(freq, wl);
+                axs = {cmpH.axB, cmpH.axA};
+                Ps  = {Pb, Pa};
+                ttl = {'Before the solvent subtraction', ...
+                       'After the solvent subtraction'};
+                hl = gobjects(1, 4);
+                for q = 1:2
+                    ax = axs{q};
+                    if logS
+                        Cdat = log10(max(Ps{q}, zLo));
+                    else
+                        Cdat = Ps{q};
+                    end
+                    cla(ax);
+                    surface(ax, F, W, zeros(size(Cdat)), Cdat, ...
+                        'EdgeColor', 'none', 'FaceColor', 'flat', ...
+                        'HitTest', 'off', 'PickableParts', 'none');
+                    view(ax, 2);
+                    ax.YDir = 'normal';
+                    ax.CLim = [cLo, cHi];
+                    colormap(ax, cmap);
+                    xlim(ax, getXlimForFreq(freq));
+                    ylim(ax, [min(wl), max(wl)]);
+                    xlabel(ax, freqAxLabel(cohResult.info.freqUnit));
+                    title(ax, ttl{q});
+                    hl(2*q - 1) = xline(ax, curFreq, 'k-', 'LineWidth', 1.0, ...
+                        'Alpha', 0.7, 'HitTest', 'off', ...
+                        'PickableParts', 'none');
+                    hl(2*q) = yline(ax, curLambda, 'k-', 'LineWidth', 1.0, ...
+                        'Alpha', 0.7, 'HitTest', 'off', ...
+                        'PickableParts', 'none');
+                    % (the surface lets the click through to the axes)
+                    ax.ButtonDownFcn = @(~, ev) onCmpClick(ev);
+                    try, disableDefaultInteractivity(ax); catch, end
+                    try, ax.Toolbar.Visible = 'off'; catch, end
+                    try, ax.Interactions = []; catch, end
+                end
+                cmpH.lines = hl;
+                ylabel(cmpH.axB, app.xAxLabel());
+                ylabel(cmpH.axA, '');
+                cmpH.cHost.CLim = [cLo, cHi];
+                colormap(cmpH.cHost, cmap);
+                cbh = app.hostCbar(cmpH.cHost);
+                cbh.Label.String = app.pick(logS, 'log_{10}|FFT|^2', '|FFT|^2');
+                app.placeCbar(cbh, cmpBar(1:2), cmpBar(3:4));
+            end
+            
+            function plotCmpSpectra()
+                wl   = app.wavelength(:);
+                freq = cohResult.freq(:);
+                Pa   = cohResult.Pmap;
+                Pb   = cohResult.before.Pmap;
+                [~, iw]  = min(abs(wl - curLambda));
+                [~, ifq] = min(abs(freq - curFreq));
+                fqAct = freq(ifq);
+                wlLo = min(edAvgWLmin.Value, edAvgWLmax.Value);
+                wlHi = max(edAvgWLmin.Value, edAvgWLmax.Value);
+                inRange = (wl >= wlLo) & (wl <= wlHi);
+                if any(inRange)
+                    avA = mean(Pa(inRange, :), 1, 'omitnan');
+                    avB = mean(Pb(inRange, :), 1, 'omitnan');
+                else
+                    avA = nan(1, numel(freq));  avB = avA;
+                end
+                axs  = {cmpH.axS, cmpH.axV};
+                yB   = {Pb(iw, :), avB};
+                yA   = {Pa(iw, :), avA};
+                cols = {[0 0 1], [0.20 0.55 0.40]};
+                ttl  = {sprintf('Power spectrum at %s = %.2f %s', ...
+                            app.xSym(), wl(iw), app.xUnitAx()), ...
+                        sprintf('Average over %s = %.0f .. %.0f %s (N=%d)', ...
+                            app.xSym(), wlLo, wlHi, app.xUnitAx(), ...
+                            nnz(inRange))};
+                for q = 1:2
+                    ax = axs{q};
+                    cla(ax);
+                    hold(ax, 'on');
+                    hB = plot(ax, freq, yB{q}, '-', ...
+                        'Color', [0.62 0.62 0.62], 'LineWidth', 1.3, ...
+                        'DisplayName', 'before subtraction');
+                    hA = plot(ax, freq, yA{q}, '-', ...
+                        'Color', cols{q}, 'LineWidth', 1.4, ...
+                        'DisplayName', 'after subtraction');
+                    xline(ax, fqAct, 'k--', 'LineWidth', 0.8, 'Alpha', 0.6);
+                    hold(ax, 'off');
+                    xlim(ax, getXlimForFreq(freq));
+                    xlabel(ax, freqAxLabel(cohResult.info.freqUnit));
+                    ylabel(ax, '|FFT|^2');
+                    title(ax, ttl{q});
+                    set(ax, 'YScale', ddYScale.Value);
+                    grid(ax, 'on');
+                    twoLegend(ax, hB, hA);
+                end
+            end
+            
+            function onCmpClick(ev)
+                % A click on a map moves the cursor of the Coherence window.
+                pt = ev.IntersectionPoint;
+                if isempty(pt), return; end
+                applyCohPoint(pt);
+            end
+            
+            function onCmpZRange()
+                % A limit of the color range of the two maps was typed.
+                if isempty(cmpFig) || ~isvalid(cmpFig), return; end
+                lo = cmpH.edZmin.Value;  hi = cmpH.edZmax.Value;
+                if ~zRangeOk(lo, hi)
+                    cmpH.edZmin.Value = cmpZUsed(1);
+                    cmpH.edZmax.Value = cmpZUsed(2);
+                    cmpH.lblNote.Text = ['Color range: the maximum has to ' ...
+                        'be larger than the minimum' ...
+                        app.pick(strcmp(ddYScale.Value, 'log'), ...
+                        ' and positive', '') '.'];
+                    return;
+                end
+                cmpZ = [lo, hi];
+                refreshCompare(false);
+            end
+            
+            function onCmpZAuto()
+                cmpZ = [];
+                refreshCompare(false);
+            end
+            
             % ============== Helpers ==============
             function v = defaultTMin()
                 % Reasonable starting time after IRF: 3*sigma, in
@@ -11786,6 +17774,93 @@ classdef TRSpecAnalyzer < handle
                     case 'thz',  lab = 'Frequency (THz)';
                     otherwise,   lab = 'Frequency (Hz)';
                 end
+            end
+            
+            function o = getOpts()
+                % FFT settings as set in the window.
+                o = struct( ...
+                    'tMin', edTMin.Value, ...
+                    'tMax', edTMax.Value, ...
+                    'apod', ddApod.Value, ...
+                    'zeroPad', round(edZpad.Value), ...
+                    'detrend', ddDet.Value, ...
+                    'freqUnit', ddFreqU.Value, ...
+                    'normMode', ddNorm.Value);
+            end
+            
+            function [R, note] = getResidual()
+                % Residual of the method chosen. The per-pixel fit takes
+                % long: its result is kept until its settings change (the
+                % window closes when the data change).
+                mth = ddResid.Value;
+                nEx = round(edNexp.Value);
+                if ~strcmp(mth, 'pixfit')
+                    [R, note] = computeResidual(mth, nEx);
+                    return;
+                end
+                if ~isempty(app.gaResultT0),   t0k = app.gaResultT0;   else, t0k = app.gaT0;   end
+                if ~isempty(app.gaResultFWHM), fwk = app.gaResultFWHM; else, fwk = app.gaFWHM; end
+                key = sprintf('pixfit|%d|%s|%s', nEx, mat2str(t0k, 12), mat2str(fwk, 12));
+                if strcmp(residCache.key, key) && ...
+                        isequal(size(residCache.R), size(app.deltaA))
+                    R = residCache.R;  note = residCache.note;
+                    return;
+                end
+                [R, note] = computeResidual(mth, nEx);
+                residCache = struct('key', key, 'R', R, 'note', note);
+            end
+            
+            function updateSolvLabel()
+                % State of the solvent subtraction, beside its button.
+                if app.solvData
+                    lblSolv.Text = sprintf(['out of the data in this ' ...
+                        'view: A = %.4g, shift %.4g %s'], ...
+                        app.solvDataA, app.solvDataShift, app.tUnitTxt());
+                elseif app.solvOn
+                    lblSolv.Text = sprintf('A = %.4g, shift %.4g %s', ...
+                        app.solvA, app.solvShift, app.tUnitTxt());
+                elseif ~isempty(app.refOrig)
+                    lblSolv.Text = 'not subtracted';
+                else
+                    lblSolv.Text = 'no solvent data';
+                end
+            end
+            
+            function openSolventDialog()
+                if edTMin.Value >= edTMax.Value
+                    uialert(f, 'Need t_min < t_max.', 'Invalid');
+                    return;
+                end
+                hk = struct( ...
+                    'fig',       f, ...
+                    'lambda',    curLambda, ...
+                    'options',   @getOpts, ...
+                    'residual',  @getResidual, ...
+                    'rerun',     @rerunQuiet, ...
+                    'changed',   @updateSolvLabel, ...
+                    'flim',      @getXlimForFreq, ...
+                    'hasResult', @hasCohResult);
+                app.openSolventWindow(hk);
+            end
+            
+            function tf = hasCohResult()
+                % (a nested function, not an anonymous one: it has to see
+                %  the result as it is when asked)
+                tf = ~isempty(cohResult.Pmap);
+            end
+            
+            function em = rerunQuiet()
+                % Run again for the solvent dialog. A failure is returned
+                % as text: that dialog is modal, an alert in this window
+                % could not be answered.
+                em = '';
+                try
+                    doRun();
+                catch ME
+                    em = ME.message;
+                    lblStatus.Text = 'Failed.';
+                end
+                updateSolvLabel();
             end
             
             function [R, note] = computeResidual(method, Nexp)
@@ -11876,28 +17951,78 @@ classdef TRSpecAnalyzer < handle
                 end
                 method = ddResid.Value;
                 lblStatus.Text = 'Computing residual...';  drawnow;
-                [Rresid, residNote] = computeResidual(method, ...
-                    round(edNexp.Value));
+                [Rresid, residNote] = getResidual();
                 
-                opts = struct( ...
-                    'tMin', edTMin.Value, ...
-                    'tMax', edTMax.Value, ...
-                    'apod', ddApod.Value, ...
-                    'zeroPad', round(edZpad.Value), ...
-                    'detrend', ddDet.Value, ...
-                    'freqUnit', ddFreqU.Value, ...
-                    'normMode', ddNorm.Value);
+                opts = getOpts();
+                updateSolvLabel();
                 
-                lblStatus.Text = 'Computing FFT map...';  drawnow;
-                tic;
-                [Pmap, freq, info] = app.computeCoherence( ...
-                    Rresid, app.delay, opts);
-                elapsed = toc;
+                % Rbef: the residual as it was before the solvent was
+                % taken out (shown beside the result). In a solvent view
+                % of the main window, what the view takes out of the
+                % data is put back for it.
+                Rbef = [];  solvNoteD = '';
+                if app.solvData
+                    Sd = app.solventInData();
+                    if isequal(size(Sd), size(Rresid)) && ...
+                            any(isfinite(Sd(:)) & Sd(:) ~= 0)
+                        Rbef = Rresid + Sd;
+                    end
+                    solvNoteD = sprintf(['Solvent %s out of the data: ' ...
+                        'A = %.4g, shift %.4g %s'], ...
+                        app.pick(strcmp(app.solvView, 'all'), 'signal', ...
+                        'coherence'), app.solvDataA, app.solvDataShift, ...
+                        app.tUnitTxt());
+                end
+                
+                % The vibrational coherence of the solvent, measured
+                % alone, is taken out of the residual before the FFT.
+                solvNote = '';
+                if app.solvOn && ~app.solvData
+                    if app.solvAllowed() && ~isempty(app.refStage) && ...
+                            isequal(size(app.refStage), size(Rresid))
+                        lblStatus.Text = 'Subtracting the solvent coherence...';
+                        drawnow;
+                        Vs = app.solventVC(app.solventData(), app.delay, ...
+                            opts, max(abs(app.solvMaxShift), abs(app.solvShift)));
+                        if isempty(Rbef), Rbef = Rresid; end
+                        Rresid = Rresid - app.solvA * ...
+                            app.solventShifted(Vs, app.delay, app.solvShift);
+                        solvNote = sprintf('Solvent: A = %.4g, shift %.4g %s', ...
+                            app.solvA, app.solvShift, app.tUnitTxt());
+                        % (the solvent views of the main window take out
+                        % what is subtracted here)
+                        app.setSolvDef(app.solvA, app.solvShift, ...
+                            [opts.tMin opts.tMax], ...
+                            max(abs(app.solvMaxShift), abs(app.solvShift)));
+                    else
+                        solvNote = 'Solvent: NOT subtracted (no usable data)';
+                        app.clearSolvDef();
+                    end
+                end
                 
                 % Time-window mask for the residual that gets shown in
                 % the time-domain panel
                 mask = (app.delay >= edTMin.Value) & ...
                        (app.delay <= edTMax.Value);
+                
+                lblStatus.Text = 'Computing FFT map...';  drawnow;
+                tic;
+                [Pmap, freq, info] = app.computeCoherence( ...
+                    Rresid, app.delay, opts);
+                % The map before the subtraction: same settings, in the
+                % units of the map after it (divided by the same
+                % normalization).
+                before = [];
+                if ~isempty(Rbef)
+                    optsB = opts;  optsB.normMode = 'none';
+                    [Pb, ~, infoB] = app.computeCoherence( ...
+                        Rbef, app.delay, optsB);
+                    Pb = Pb ./ info.normScale;
+                    Pb(~isfinite(Pb)) = 0;
+                    before = struct('Pmap', Pb, 'RinWin', Rbef(:, mask), ...
+                        'Phimap', infoB.Phimap);
+                end
+                elapsed = toc;
                 
                 cohResult.Pmap   = Pmap;
                 cohResult.freq   = freq;
@@ -11905,6 +18030,8 @@ classdef TRSpecAnalyzer < handle
                 cohResult.tWin   = app.delay(mask);
                 cohResult.RinWin = Rresid(:, mask);
                 cohResult.info   = info;
+                cohResult.before = before;
+                syncBar();
                 
                 btnExpMap.Enable  = 'on';
                 btnExpSpec.Enable = 'on';
@@ -11925,6 +18052,12 @@ classdef TRSpecAnalyzer < handle
                 lines{end+1} = sprintf('Residual: %s', method);
                 if ~isempty(residNote)
                     lines{end+1} = residNote;
+                end
+                if ~isempty(solvNoteD)
+                    lines{end+1} = solvNoteD;
+                end
+                if ~isempty(solvNote)
+                    lines{end+1} = solvNote;
                 end
                 lines{end+1} = sprintf('Window: %.4g .. %.4g %s', ...
                     edTMin.Value, edTMax.Value, app.tUnitTxt());
@@ -11961,48 +18094,44 @@ classdef TRSpecAnalyzer < handle
                         'avgHi',   edAvgWLmax.Value, ...
                         'dispLo',  edDispVmin.Value, ...
                         'dispHi',  edDispVmax.Value));
+                saveView();
             end
             
             function plotResults()
+                % The map, the four curve plots and the side-by-side
+                % window.
+                if isempty(cohResult.Pmap), return; end
+                plotMap();
+                update1Ds();
+                refreshCompare(false);
+            end
+            
+            function plotMap()
                 if isempty(cohResult.Pmap), return; end
                 wl   = app.wavelength(:).';
                 freq = cohResult.freq(:).';
-                Pmap = cohResult.Pmap;
+                Pmap = mapShown();     % after or before the subtraction
                 
                 cmap = turboMap(256);
                 
-                % Choose the data subset used for the color-axis
-                % normalization: if the user has set a Display nu range
-                % we use only the visible band, otherwise the full FFT.
-                dispLimsTmp = getDispLims();
-                if ~isempty(dispLimsTmp)
-                    fMaskDisp = freq >= dispLimsTmp(1) & ...
-                                freq <= dispLimsTmp(2);
-                    Psub = Pmap(:, fMaskDisp);
-                    if isempty(Psub), Psub = Pmap; end
-                else
-                    Psub = Pmap;
-                end
+                % Color range: set by hand, or from the visible band (the
+                % Display nu range; the full FFT without one). The fields
+                % of the bar show the range in use.
+                [cLo, cHi, zLo, zHi] = colorLims(Pmap, zManual);
+                zUsed = [zLo, zHi];
+                edZmin.Value = zLo;  edZmax.Value = zHi;
+                btnZAuto.Enable = app.pick(~isempty(zManual), 'on', 'off');
                 
                 % Build the surface CData. In 'log' mode we display
                 % log10(P) so the colormap lays a logarithmic z-scale on
-                % the heatmap; very small values are clipped to a floor
-                % to avoid -Inf.
+                % the heatmap; very small values are clipped to the lower
+                % limit to avoid -Inf.
                 if strcmp(ddYScale.Value, 'log')
-                    pkAll = max(Psub(:), [], 'omitnan');
-                    if ~isfinite(pkAll) || pkAll <= 0, pkAll = 1; end
-                    floorVal = pkAll * 1e-4;       % 4 decades dyn. range
-                    Pdisp    = max(Pmap, floorVal);
-                    Cdat     = log10(Pdisp);
-                    cLo = log10(floorVal);
-                    cHi = log10(pkAll);
+                    Cdat    = log10(max(Pmap, zLo));
                     cbLabel = 'log_{10}|FFT|^2';
                 else
-                    Cdat   = Pmap;
+                    Cdat    = Pmap;
                     cbLabel = '|FFT|^2';
-                    cl = max(Psub(:), [], 'omitnan');
-                    if ~isfinite(cl) || cl <= 0, cl = 1; end
-                    cLo = 0;  cHi = cl;
                 end
                 
                 cla(axMap);
@@ -12019,8 +18148,14 @@ classdef TRSpecAnalyzer < handle
                 ylim(axMap, [min(wl),   max(wl)]);
                 xlabel(axMap, freqAxLabel(cohResult.info.freqUnit));
                 ylabel(axMap, app.xAxLabel());
-                title(axMap, '|FFT|^2 map');
-                cb = colorbar(axMap);
+                if ~hasBefore()
+                    title(axMap, '|FFT|^2 map');
+                elseif showBefore()
+                    title(axMap, '|FFT|^2 map (before the solvent subtraction)');
+                else
+                    title(axMap, '|FFT|^2 map (after the solvent subtraction)');
+                end
+                cb = app.boxCbar(axMap);
                 cb.Label.String = cbLabel;
                 % Re-disable interactivity AFTER cla / surface, since
                 % MATLAB may quietly re-attach default interactions when
@@ -12034,7 +18169,8 @@ classdef TRSpecAnalyzer < handle
                     curLambda = mean([min(wl), max(wl)]);
                 end
                 if ~isfinite(curFreq)
-                    [~, iC]  = max(max(Pmap, [], 1));
+                    % (from the result: after the subtraction)
+                    [~, iC]  = max(max(cohResult.Pmap, [], 1));
                     curFreq  = freq(iC);
                 end
                 xhV = xline(axMap, curFreq, 'k-', 'LineWidth', 1.0, ...
@@ -12057,8 +18193,6 @@ classdef TRSpecAnalyzer < handle
                 % (HitTest = off, PickableParts = none), so clicks pass
                 % through to the axes itself which fires onMapClick.
                 axMap.ButtonDownFcn = @(~,ev) onMapClick(ev);
-                
-                update1Ds();
             end
             
             function onMapClick(ev)
@@ -12137,6 +18271,7 @@ classdef TRSpecAnalyzer < handle
                 if ~isempty(xhV) && isvalid(xhV), xhV.Value = curFreq;   end
                 if ~isempty(xhH) && isvalid(xhH), xhH.Value = curLambda; end
                 update1Ds();
+                refreshCompare(true);
                 drawnow limitrate;
             end
             
@@ -12151,12 +18286,24 @@ classdef TRSpecAnalyzer < handle
                 wlAct  = wl(iw);
                 fqAct  = freq(ifq);
                 
+                % Before the solvent subtraction: gray, behind the result.
+                gray  = grayOn();
+                grayC = [0.62 0.62 0.62];
+                
                 % Power spectrum at clicked lambda (top of right panel)
                 cla(axPSpec);
                 hold(axPSpec, 'on');
-                plot(axPSpec, freq, Pmap(iw, :), 'b-', 'LineWidth', 1.4);
+                hB = [];
+                if gray
+                    hB = plot(axPSpec, freq, cohResult.before.Pmap(iw, :), ...
+                        '-', 'Color', grayC, 'LineWidth', 1.3, ...
+                        'DisplayName', 'before');
+                end
+                hA = plot(axPSpec, freq, Pmap(iw, :), 'b-', ...
+                    'LineWidth', 1.4, 'DisplayName', 'after');
                 xline(axPSpec, fqAct, 'k--', 'LineWidth', 0.8, 'Alpha', 0.6);
                 hold(axPSpec, 'off');
+                twoLegend(axPSpec, hB, hA);
                 xlim(axPSpec, getXlimForFreq(freq));
                 xlabel(axPSpec, '');                    % shared with avg below
                 ylabel(axPSpec, '|FFT|^2');
@@ -12178,11 +18325,25 @@ classdef TRSpecAnalyzer < handle
                     Pavg = nan(1, numel(freq));
                 end
                 hold(axPSpecAvg, 'on');
-                plot(axPSpecAvg, freq, Pavg, '-', ...
-                    'Color', [0.20 0.55 0.40], 'LineWidth', 1.4);
+                hB = [];
+                if gray
+                    if any(inRange)
+                        PavgB = mean(cohResult.before.Pmap(inRange, :), ...
+                            1, 'omitnan');
+                    else
+                        PavgB = nan(1, numel(freq));
+                    end
+                    hB = plot(axPSpecAvg, freq, PavgB, '-', ...
+                        'Color', grayC, 'LineWidth', 1.3, ...
+                        'DisplayName', 'before');
+                end
+                hA = plot(axPSpecAvg, freq, Pavg, '-', ...
+                    'Color', [0.20 0.55 0.40], 'LineWidth', 1.4, ...
+                    'DisplayName', 'after');
                 xline(axPSpecAvg, fqAct, 'k--', 'LineWidth', 0.8, ...
                     'Alpha', 0.6);
                 hold(axPSpecAvg, 'off');
+                twoLegend(axPSpecAvg, hB, hA);
                 xlim(axPSpecAvg, getXlimForFreq(freq));
                 xlabel(axPSpecAvg, freqAxLabel(cohResult.info.freqUnit));
                 ylabel(axPSpecAvg, '|FFT|^2');
@@ -12195,9 +18356,17 @@ classdef TRSpecAnalyzer < handle
                 % Spectral profile at wavenumber: top |FFT|^2, bottom phase
                 cla(axProf);
                 hold(axProf, 'on');
-                plot(axProf, wl, Pmap(:, ifq), 'b-', 'LineWidth', 1.4);
+                hB = [];
+                if gray
+                    hB = plot(axProf, wl, cohResult.before.Pmap(:, ifq), ...
+                        '-', 'Color', grayC, 'LineWidth', 1.3, ...
+                        'DisplayName', 'before');
+                end
+                hA = plot(axProf, wl, Pmap(:, ifq), 'b-', ...
+                    'LineWidth', 1.4, 'DisplayName', 'after');
                 xline(axProf, wlAct, 'k--', 'LineWidth', 0.8, 'Alpha', 0.6);
                 hold(axProf, 'off');
+                twoLegend(axProf, hB, hA);
                 xlim(axProf, [min(wl), max(wl)]);
                 xlabel(axProf, '');
                 ylabel(axProf, '|FFT|^2');
@@ -12225,6 +18394,19 @@ classdef TRSpecAnalyzer < handle
                     end
                     
                     hold(axProfPh, 'on');
+                    if gray && isfield(cohResult.before, 'Phimap') && ...
+                            ~isempty(cohResult.before.Phimap)
+                        % (masked like the result: below 5 % of the peak
+                        %  of its own column)
+                        phB = cohResult.before.Phimap(:, ifq);
+                        pB  = cohResult.before.Pmap(:, ifq);
+                        pkB = max(pB, [], 'omitnan');
+                        if isfinite(pkB) && pkB > 0
+                            phB(pB < 0.05 * pkB) = NaN;
+                        end
+                        plot(axProfPh, wl, phB, '-', ...
+                            'Color', grayC, 'LineWidth', 1.3);
+                    end
                     plot(axProfPh, wl, phaseCol, '-', ...
                         'Color', [0.55 0.30 0.70], 'LineWidth', 1.4);
                     yline(axProfPh, 0, 'k:');
@@ -12244,10 +18426,19 @@ classdef TRSpecAnalyzer < handle
                 % Residual time trace at lambda (within window)
                 cla(axRes);
                 hold(axRes, 'on');
-                plot(axRes, cohResult.tWin, ...
-                    cohResult.RinWin(iw, :), 'k-', 'LineWidth', 1.0);
+                hB = [];
+                if gray
+                    hB = plot(axRes, cohResult.tWin, ...
+                        cohResult.before.RinWin(iw, :), '-', ...
+                        'Color', grayC, 'LineWidth', 1.0, ...
+                        'DisplayName', 'before');
+                end
+                hA = plot(axRes, cohResult.tWin, ...
+                    cohResult.RinWin(iw, :), 'k-', 'LineWidth', 1.0, ...
+                    'DisplayName', 'after');
                 yline(axRes, 0, 'k:');
                 hold(axRes, 'off');
+                twoLegend(axRes, hB, hA);
                 xlabel(axRes, sprintf('Delay time (%s)', app.tUnitAx()));
                 ylabel(axRes, 'Residual');
                 title(axRes, sprintf( ...
@@ -12272,8 +18463,14 @@ classdef TRSpecAnalyzer < handle
                 edAvgWLmax.Value = max(app.wavelength);
                 edDispVmin.Value = 0;
                 edDispVmax.Value = 0;
+                ddShow.Value = 'after';
+                cbGray.Value = true;
                 cohResult = struct('Pmap', [], 'freq', [], ...
-                    'Rresid', [], 'tWin', [], 'info', struct());
+                    'Rresid', [], 'tWin', [], 'info', struct(), ...
+                    'before', []);
+                zManual = [];  zUsed = [0 1];
+                edZmin.Value = 0;  edZmax.Value = 1;
+                syncBar();
                 curFreq = NaN;
                 xhV = [];  xhH = [];
                 yhAvgLo = [];  yhAvgHi = [];
@@ -12288,6 +18485,8 @@ classdef TRSpecAnalyzer < handle
                 end
                 cla(axMap);  cla(axPSpec);  cla(axPSpecAvg);
                 cla(axProf);  cla(axProfPh);  cla(axRes);
+                legend(axPSpec, 'off');  legend(axPSpecAvg, 'off');
+                legend(axProf, 'off');   legend(axRes, 'off');
                 title(axMap, '|FFT|^2 map');
                 title(axPSpec, 'Power spectrum at clicked \lambda');
                 title(axPSpecAvg, 'Average over \lambda range');
@@ -12296,13 +18495,25 @@ classdef TRSpecAnalyzer < handle
                 lblStatus.Text  = 'Reset.';
                 txtResult.Value = {'Click "Run Coherence" to compute the FFT map.'};
                 app.cohSaved = [];
+                if ~app.solvData
+                    % (in a solvent view the subtraction belongs to the
+                    % view "Data" and stays)
+                    app.solvOn = false;
+                    app.clearSolvDef();
+                end
+                updateSolvLabel();
             end
             
             function exportMap()
+                % The map on display: after the solvent subtraction, or
+                % before it ("Map shows").
                 if isempty(cohResult.Pmap), return; end
+                Pexp = mapShown();
                 [file, path] = app.putFile( ...
                     {'*.csv','CSV (*.csv)'; '*.dat','DAT (tab, *.dat)'}, ...
-                    app.uiStr('Export |FFT|^2 map'), 'coherence_map.csv');
+                    app.uiStr('Export |FFT|^2 map'), ...
+                    app.pick(showBefore(), 'coherence_map_before.csv', ...
+                    'coherence_map.csv'));
                 if isequal(file, 0), return; end
                 full = fullfile(path, file);
                 [~, ~, ext] = fileparts(full);
@@ -12313,7 +18524,7 @@ classdef TRSpecAnalyzer < handle
                     % Transposed layout: rows index frequency, columns
                     % index wavelength.  First column = frequency axis,
                     % header row = wavelengths.
-                    matT = [freq, cohResult.Pmap.'];   % Nfreq x (1 + Nwl)
+                    matT = [freq, Pexp.'];             % Nfreq x (1 + Nwl)
                     fid = fopen(full, 'w');
                     if fid < 0
                         error('Could not open file for writing: %s', full);
@@ -12341,6 +18552,11 @@ classdef TRSpecAnalyzer < handle
                 hdr = {sprintf('nu_%s', cohResult.info.freqUnit), ...
                        'power'};
                 mat = [cohResult.freq(:), cohResult.Pmap(iw, :).'];
+                if grayOn()
+                    % (the gray curve of the plot)
+                    hdr{end+1} = 'power_before';
+                    mat = [mat, cohResult.before.Pmap(iw, :).'];
+                end
                 exportTbl(mat, hdr, ...
                     sprintf('coherence_Pnu_%.0f%s', wl(iw), app.xUnitTxt()), ...
                     'Export power spectrum');
@@ -12363,6 +18579,11 @@ classdef TRSpecAnalyzer < handle
                 hdr = {sprintf('nu_%s', cohResult.info.freqUnit), ...
                        'power_avg'};
                 mat = [cohResult.freq(:), Pavg];
+                if grayOn()
+                    hdr{end+1} = 'power_avg_before';
+                    mat = [mat, mean(cohResult.before.Pmap(inRange, :), ...
+                        1, 'omitnan').'];
+                end
                 exportTbl(mat, hdr, ...
                     sprintf('coherence_avgPnu_%.0f-%.0f%s', ...
                         wlLo, wlHi, app.xUnitTxt()), ...
@@ -12381,6 +18602,15 @@ classdef TRSpecAnalyzer < handle
                 else
                     hdr = {app.xHdr(), 'power'};
                     mat = [app.wavelength(:), cohResult.Pmap(:, ifq)];
+                end
+                if grayOn()
+                    hdr{end+1} = 'power_before';
+                    mat = [mat, cohResult.before.Pmap(:, ifq)];
+                    if isfield(cohResult.before, 'Phimap') && ...
+                            ~isempty(cohResult.before.Phimap)
+                        hdr{end+1} = 'phase_before_rad';
+                        mat = [mat, cohResult.before.Phimap(:, ifq)];
+                    end
                 end
                 exportTbl(mat, hdr, ...
                     sprintf('coherence_profile_%.0f%s', ...
@@ -12427,6 +18657,7 @@ classdef TRSpecAnalyzer < handle
                     try, delete(cohDragTimer); catch, end
                     cohDragTimer = [];
                 end
+                closeCompare();
                 app.coherenceFig = [];
                 delete(f);
             end
@@ -12667,17 +18898,17 @@ classdef TRSpecAnalyzer < handle
             rgl.ColumnWidth = {'3x', '2x'};
             rgl.Padding = [8 8 8 8];  rgl.RowSpacing = 8;  rgl.ColumnSpacing = 8;
 
-            axMap = uiaxes(rgl);  axMap.Layout.Row = 1;  axMap.Layout.Column = 1;
+            axMap = app.boxAxes(rgl, [56 74 24 40], 1, 1);
             disableDefaultInteractivity(axMap);
             axMap.Toolbar.Visible = 'off';
             axMap.Interactions = [];
             title(axMap, '\nu-t map');
 
-            axDecay = uiaxes(rgl);  axDecay.Layout.Row = 1;  axDecay.Layout.Column = 2;
+            axDecay = app.boxAxes(rgl, [56 14 24 40], 1, 2);
             title(axDecay, 'Power vs time at selected \nu');
-            axSpecT = uiaxes(rgl);  axSpecT.Layout.Row = 2;  axSpecT.Layout.Column = 1;
+            axSpecT = app.boxAxes(rgl, [56 74 24 40], 2, 1);
             title(axSpecT, 'Spectrum at selected t');
-            axTrace = uiaxes(rgl);  axTrace.Layout.Row = 2;  axTrace.Layout.Column = 2;
+            axTrace = app.boxAxes(rgl, [56 14 24 40], 2, 2);
             title(axTrace, 'Input trace (analysis window)');
 
             % ---- State ----
@@ -13004,7 +19235,7 @@ classdef TRSpecAnalyzer < handle
                         info.omega0, tfResult.srcLabel);
                 end
                 title(axMap, ttl);
-                cb = colorbar(axMap);  cb.Label.String = cbLabel;
+                cb = app.boxCbar(axMap);  cb.Label.String = cbLabel;
                 % Re-apply interaction lock after cla (uiaxes resets it).
                 disableDefaultInteractivity(axMap);
                 axMap.Toolbar.Visible = 'off';
@@ -13096,7 +19327,7 @@ classdef TRSpecAnalyzer < handle
                 if strcmp(info.method, 'stft')
                     title(axTrace, 'Input trace  (shaded = STFT window at cursor)');
                 else
-                    title(axTrace, 'Input trace  (shaded = wavelet e-folding width at cursor \nu)');
+                    title(axTrace, 'Input trace  (shaded = wavelet e-folding width)');
                 end
             end
 
@@ -13346,7 +19577,7 @@ classdef TRSpecAnalyzer < handle
                 cl = max(abs(C(:)), [], 'omitnan');
                 if isempty(cl) || cl == 0 || isnan(cl), cl = 1; end
                 ax.CLim = [-cl cl];  colormap(ax, app.getColormap());
-                cb = colorbar(ax);  cb.Label.String = '\DeltaA or Intensity';
+                cb = colorbar(ax);  cb.Label.String = app.sigName();
                 
                 % alpha mask: 1 inside crop box, 0.2 outside
                 mask = (W >= wl1) & (W <= wl2) & (T >= t1) & (T <= t2);
@@ -13490,8 +19721,9 @@ classdef TRSpecAnalyzer < handle
                  'FontColor', [0.15 0.15 0.15]);
             
             % Row 2: file buttons + transpose
-            btnPnl = uigridlayout(gl, [1, 6]);
-            btnPnl.ColumnWidth = {'fit', 'fit', 'fit', 'fit', 'fit', '1x'};
+            btnPnl = uigridlayout(gl, [1, 8]);
+            btnPnl.ColumnWidth = {'fit', 'fit', 'fit', 'fit', 'fit', ...
+                                  'fit', 120, '1x'};
             btnPnl.Padding = [0 0 0 0];
             btnAdd = uibutton(btnPnl, 'Text', 'Add more files...');
             btnRem = uibutton(btnPnl, 'Text', 'Remove selected');
@@ -13504,12 +19736,24 @@ classdef TRSpecAnalyzer < handle
                     'Use this when the source files were saved with ' ...
                     'rows = delay and columns = wavelength instead of ' ...
                     'the expected layout.']);
+            uilabel(btnPnl, 'Text', '   Signal:', 'HorizontalAlignment', 'right');
+            ddSigAvg = uidropdown(btnPnl, ...
+                'Items', {app.sigShort('dA'), app.sigShort('dTT'), ...
+                          app.sigShort('int')}, ...
+                'ItemsData', {'dA', 'dTT', 'int'}, ...
+                'Value', app.sigLoadKind, ...
+                'Tooltip', app.uiStr(['What the numbers in the files are: ' ...
+                    '\DeltaA or \DeltaT/T (transient absorption, TR-IR) ' ...
+                    'or an intensity (TR-PL, Raman). Remembered for the ' ...
+                    'next files.']));
             uilabel(btnPnl, 'Text', '');
             
             % Row 3: file table
             tbl = uitable(gl);
-            tbl.ColumnName     = {'File', app.uiStr('Max |\DeltaA|'), 'Include', ...
+            tbl.ColumnName     = {'File', ...
+                ['Max |' app.sigShort(app.sigLoadKind) '|'], 'Include', ...
                 sprintf('Shift (%s)', app.tUnitTxt()), 'Ref'};
+            ddSigAvg.ValueChangedFcn = @(~,~) onSigKindAvg();
             tbl.ColumnFormat   = {'char', 'char', 'logical', ...
                 'numeric', 'logical'};
             tbl.ColumnEditable = [false false true true true];
@@ -13561,8 +19805,8 @@ classdef TRSpecAnalyzer < handle
             % Row 5: preview axes (2 side by side)
             pvGl = uigridlayout(gl, [1, 2]);
             pvGl.Padding = [0 0 0 0];  pvGl.ColumnSpacing = 8;
-            axPrevS = uiaxes(pvGl);   axPrevS.Layout.Column = 1;
-            axPrevK = uiaxes(pvGl);   axPrevK.Layout.Column = 2;
+            axPrevS = app.boxAxes(pvGl, [56 14 24 40], [], 1);
+            axPrevK = app.boxAxes(pvGl, [56 14 24 40], [], 2);
             
             % Click + drag inside the previews moves Ref lambda / Ref t.
             % Motion / up handlers are permanently attached and no-op
@@ -13818,6 +20062,13 @@ classdef TRSpecAnalyzer < handle
                 drawnow limitrate;
             end
             
+            function onSigKindAvg()
+                app.sigLoadKind = ddSigAvg.Value;
+                app.savePrefs();
+                tbl.ColumnName{2} = ['Max |' app.sigShort(app.sigLoadKind) '|'];
+                drawPreview();
+            end
+            
             function drawPreview()
                 refWL = edRefWL.Value;  refT = edRefT.Value;
                 wlAx = files(1).wavelength;
@@ -13867,7 +20118,7 @@ classdef TRSpecAnalyzer < handle
                     'PickableParts', 'none');
                 hold(axPrevS, 'off');
                 xlabel(axPrevS, app.xAxLabel());
-                ylabel(axPrevS, '\DeltaA or Intensity');
+                ylabel(axPrevS, app.sigNameOf(app.sigLoadKind));
                 grid(axPrevS, 'on');
                 xlim(axPrevS, [min(wlAx), max(wlAx)]);
                 title(axPrevS, sprintf('Spectrum at t = %.3g %s', ...
@@ -13918,7 +20169,7 @@ classdef TRSpecAnalyzer < handle
                 end
                 hold(axPrevK, 'off');
                 xlabel(axPrevK, sprintf('Delay time (%s)', app.tUnitAx()));
-                ylabel(axPrevK, '\DeltaA or Intensity');
+                ylabel(axPrevK, app.sigNameOf(app.sigLoadKind));
                 grid(axPrevK, 'on');
                 if strcmp(ddKinScale.Value, 'Log')
                     set(axPrevK, 'XScale', 'log');
@@ -14186,7 +20437,7 @@ classdef TRSpecAnalyzer < handle
             
             ax = uiaxes(gl);
             ax.Layout.Row = 2;  ax.Layout.Column = [1 3];
-            xlabel(ax, app.xAxLabel());  ylabel(ax, '\DeltaA or Intensity');
+            xlabel(ax, app.xAxLabel());  ylabel(ax, app.sigName());
             title(ax, 'Early-time spectra and their mean (background)');
             
             ctrl = uigridlayout(gl, [1, 3]);
@@ -14208,12 +20459,13 @@ classdef TRSpecAnalyzer < handle
                 if N < 1 || N > numel(app.delay), return; end
                 app.claAll(ax);  hold(ax, 'on');   % preview lines are hidden-handle
                 cmap = parula(max(N, 2));
+                pb = app.pipelineBase();
                 for k = 1:N
-                    plot(ax, app.wavelength, app.deltaA_raw(:, k), '-', ...
+                    plot(ax, app.wavelength, pb(:, k), '-', ...
                         'Color', [cmap(k,:), 0.6], 'LineWidth', 0.7, ...
                         'HandleVisibility', 'off');
                 end
-                bg = mean(app.deltaA_raw(:, 1:N), 2, 'omitnan');
+                bg = mean(pb(:, 1:N), 2, 'omitnan');
                 hMean = plot(ax, app.wavelength, bg, 'k-', 'LineWidth', 2, ...
                     'DisplayName', sprintf('Mean of first %d point(s)', N));
                 hold(ax, 'off');
@@ -14231,7 +20483,8 @@ classdef TRSpecAnalyzer < handle
                 if N < 1 || N > numel(app.delay), return; end
                 applyBusy = true;
                 try
-                    app.bgSpectrum = mean(app.deltaA_raw(:, 1:N), 2, 'omitnan');
+                    pb = app.pipelineBase();
+                    app.bgSpectrum = mean(pb(:, 1:N), 2, 'omitnan');
                     app.bgN        = N;
                     app.bgApplied  = true;
                     app.updateAll();
@@ -14307,8 +20560,7 @@ classdef TRSpecAnalyzer < handle
                  'FontColor', [0.15 0.15 0.15]);
             lblHdr.Layout.Row = 1;  lblHdr.Layout.Column = [1 2];
             
-            axMap = uiaxes(gl);
-            axMap.Layout.Row = 2;  axMap.Layout.Column = 1;
+            axMap = app.boxAxes(gl, [56 74 40 40], 2, 1);
             axMap.Color = [0.93 0.93 0.93];
             xlabel(axMap, app.xAxLabel());
             ylabel(axMap, sprintf('Delay time (%s)', app.tUnitAx()));
@@ -14319,7 +20571,7 @@ classdef TRSpecAnalyzer < handle
             rgl.RowHeight   = {'1x', '1x', '1x'};
             rgl.Padding     = [0 0 0 0];  rgl.RowSpacing = 8;
             
-            axFit = uiaxes(rgl);
+            axFit = app.boxAxes(rgl, [56 14 40 40]);
             xlabel(axFit, app.xAxLabel());  ylabel(axFit, sprintf('t_0 (%s)', app.tUnitAx()));
             title(axFit, 'Polynomial fit preview');
             grid(axFit, 'on');
@@ -14329,9 +20581,9 @@ classdef TRSpecAnalyzer < handle
                                sprintf('t (%s)', app.tUnitTxt())}, ...
                 'ColumnEditable', [false false]);
             
-            axKinP = uiaxes(rgl);
+            axKinP = app.boxAxes(rgl, [56 14 24 40]);
             xlabel(axKinP, sprintf('Delay time (%s)', app.tUnitAx()));
-            ylabel(axKinP, '\DeltaA or Intensity');
+            ylabel(axKinP, app.sigName());
             title(axKinP, 'Kinetics at last-clicked \lambda');
             grid(axKinP, 'on');
             
@@ -14446,7 +20698,7 @@ classdef TRSpecAnalyzer < handle
                 cl = max(abs(base(:)), [], 'omitnan');
                 if isempty(cl) || cl == 0 || isnan(cl), cl = 1; end
                 axMap.CLim = [-cl cl];  colormap(axMap, app.getColormap());
-                cb = colorbar(axMap);  cb.Label.String = '\DeltaA or Intensity';
+                cb = app.boxCbar(axMap);  cb.Label.String = app.sigName();
                 h.ButtonDownFcn     = @(~,ev) addPt(ev);
                 axMap.ButtonDownFcn = @(~,ev) addPt(ev);
                 if app.bgApplied
@@ -15084,16 +21336,18 @@ classdef TRSpecAnalyzer < handle
             dadsRow = uigridlayout(rgl, [1, 2]);
             dadsRow.Layout.Row = 2;
             dadsRow.ColumnWidth = {'1x', '1x'};
+            % (the rows under the maps reach to the right edge: the
+            % room of the color bar of the last map is not left free)
             dadsRow.Padding = [0 0 0 0];
             dadsRow.ColumnSpacing = 8;
             
-            axDADS = uiaxes(dadsRow);
+            axDADS = app.boxAxes(dadsRow, [56 14 24 40]);
             xlabel(axDADS, app.xAxLabel());
-            ylabel(axDADS, 'Amplitude (\DeltaA or Intensity)');
+            ylabel(axDADS, ['Amplitude (' app.sigName() ')']);
             title(axDADS, 'Decay-associated difference spectra');
             grid(axDADS, 'on');
             
-            axDADSnorm = uiaxes(dadsRow);
+            axDADSnorm = app.boxAxes(dadsRow, [56 14 24 40]);
             xlabel(axDADSnorm, app.xAxLabel());
             ylabel(axDADSnorm, 'Normalized amplitude');
             title(axDADSnorm, 'DADS (peak-normalized)');
@@ -15106,14 +21360,14 @@ classdef TRSpecAnalyzer < handle
             eadsRow.Padding = [0 0 0 0];
             eadsRow.ColumnSpacing = 8;
             
-            axEADS = uiaxes(eadsRow);
+            axEADS = app.boxAxes(eadsRow, [56 14 24 40]);
             xlabel(axEADS, app.xAxLabel());
-            ylabel(axEADS, 'Amplitude (\DeltaA or Intensity)');
+            ylabel(axEADS, ['Amplitude (' app.sigName() ')']);
             title(axEADS, ['Evolution-associated difference spectra  ' ...
                 '(sequential model)']);
             grid(axEADS, 'on');
             
-            axEADSnorm = uiaxes(eadsRow);
+            axEADSnorm = app.boxAxes(eadsRow, [56 14 24 40]);
             xlabel(axEADSnorm, app.xAxLabel());
             ylabel(axEADSnorm, 'Normalized amplitude');
             title(axEADSnorm, 'EADS (peak-normalized)');
@@ -15157,22 +21411,19 @@ classdef TRSpecAnalyzer < handle
             kinAxRow.Padding       = [0 0 0 0];
             kinAxRow.ColumnSpacing = 8;
             
-            axKinFit = uiaxes(kinAxRow);
-            axKinFit.Layout.Column = 1;
+            axKinFit = app.boxAxes(kinAxRow, [56 14 24 40], [], 1);
             xlabel(axKinFit, sprintf('Delay time (%s)', app.tUnitAx()));
-            ylabel(axKinFit, '\DeltaA or Intensity');
+            ylabel(axKinFit, app.sigName());
             title(axKinFit, 'Kinetics fit at selected \lambda');
             grid(axKinFit, 'on');
             
-            axKinRes = uiaxes(kinAxRow);
-            axKinRes.Layout.Column = 2;
+            axKinRes = app.boxAxes(kinAxRow, [56 14 24 40], [], 2);
             xlabel(axKinRes, sprintf('Delay time (%s)', app.tUnitAx()));
-            ylabel(axKinRes, 'Residual (\DeltaA or Intensity)');
+            ylabel(axKinRes, ['Residual (' app.sigName() ')']);
             title(axKinRes, 'Fit residual');
             grid(axKinRes, 'on');
             
-            axPop = uiaxes(kinAxRow);
-            axPop.Layout.Column = 3;
+            axPop = app.boxAxes(kinAxRow, [56 14 24 40], [], 3);
             xlabel(axPop, sprintf('Delay time (%s)', app.tUnitAx()));
             ylabel(axPop, 'Population');
             title(axPop, 'EADS populations c_i(t)');
@@ -15552,6 +21803,9 @@ classdef TRSpecAnalyzer < handle
                 end
                 if isfield(info, 'fwhmAtLimit') && info.fwhmAtLimit
                     lines{end+1} = sprintf('IRF FWHM = %.4g %s  [not resolved]', ...
+                        fwhmOut, app.tUnitTxt());
+                elseif isfield(info, 'fwhmTooWide') && info.fwhmTooWide
+                    lines{end+1} = sprintf('IRF FWHM = %.4g %s  [not determined by the data]', ...
                         fwhmOut, app.tUnitTxt());
                 elseif isfield(info, 'fwhmStd') && isfinite(info.fwhmStd)
                     lines{end+1} = sprintf('IRF FWHM = %.4g +/- %.2g %s', ...
@@ -16001,7 +22255,7 @@ classdef TRSpecAnalyzer < handle
                 yline(axDADS, 0, 'k:');
                 hold(axDADS, 'off');  grid(axDADS, 'on');
                 xlabel(axDADS, app.xAxLabel());
-                ylabel(axDADS, 'Amplitude (\DeltaA or Intensity)');
+                ylabel(axDADS, ['Amplitude (' app.sigName() ')']);
                 title(axDADS, sprintf('Decay-associated difference spectra   (RMS = %.3g)', ...
                     app.gaResultRMS));
                 if ~isempty(legS)
@@ -16051,12 +22305,12 @@ classdef TRSpecAnalyzer < handle
                 cla(axEADS);  cla(axEADSnorm);
                 if isempty(app.gaResultEADS)
                     if any(resStretch())
-                        title(axEADS, ['Species-associated spectra ' ...
-                            '(sequential, with stretched) - run fit to compute']);
+                        title(axEADS, ['SAS (sequential, with stretched) ' ...
+                            '- run fit to compute']);
                         title(axEADSnorm, 'SAS (peak-normalized)');
                     else
-                        title(axEADS, ['Evolution-associated difference spectra  ' ...
-                            '(sequential) - run fit to compute']);
+                        title(axEADS, ['EADS (sequential model) ' ...
+                            '- run fit to compute']);
                         title(axEADSnorm, 'EADS (peak-normalized)');
                     end
                     return;
@@ -16098,7 +22352,7 @@ classdef TRSpecAnalyzer < handle
                 yline(axEADS, 0, 'k:');
                 hold(axEADS, 'off');  grid(axEADS, 'on');
                 xlabel(axEADS, app.xAxLabel());
-                ylabel(axEADS, 'Amplitude (\DeltaA or Intensity)');
+                ylabel(axEADS, ['Amplitude (' app.sigName() ')']);
                 if ~isempty(legS)
                     legend(axEADS, legH, legS, 'Location', 'best');
                 else
@@ -16175,8 +22429,10 @@ classdef TRSpecAnalyzer < handle
                 if isempty(clr) || clr == 0 || isnan(clr), clr = cl/10; end
                 resRMS = sqrt(mean(R(isfinite(R)).^2));
                 
+                % Every map shows its color bar. Data and fit have the
+                % same color range, the residual has its own.
                 drawMapStack(mapAxExp, cbarAxExp, t, wl, app.deltaA.',    [-cl cl],  cmap, true);
-                drawMapStack(mapAxFit, cbarAxFit, t, wl, app.gaResultFit.', [-cl cl],  cmap, false);
+                drawMapStack(mapAxFit, cbarAxFit, t, wl, app.gaResultFit.', [-cl cl],  cmap, true);
                 drawMapStack(mapAxRes, cbarAxRes, t, wl, R.',             [-clr clr], cmap, true);
                 
                 % Panels carry the human-readable titles (axes-level titles
@@ -16225,7 +22481,7 @@ classdef TRSpecAnalyzer < handle
                     hp = hosts(h);
                     delete(hp.Children);
                     g = uigridlayout(hp, [nRows, 2]);
-                    g.ColumnWidth   = {'1x', 50};
+                    g.ColumnWidth   = {'1x', 75};
                     g.RowHeight     = repmat({'1x'}, 1, nRows);
                     g.Padding       = [0 0 0 0];
                     g.ColumnSpacing = 2;
@@ -16234,18 +22490,16 @@ classdef TRSpecAnalyzer < handle
                     dAx = gobjects(1, nRows);
                     cAx = gobjects(1, nRows);
                     for r = 1:nRows
-                        dAx(r) = uiaxes(g);
-                        dAx(r).Layout.Row    = r;
-                        dAx(r).Layout.Column = 1;
+                        % (numbers and label of the x-axis under the
+                        % last row only)
+                        dAx(r) = app.boxAxes(g, ...
+                            [56 14 8 8 + 32 * (r == nRows)], r, 1);
                         dAx(r).Color = [0.93 0.93 0.93];
                         xlabel(dAx(r), app.xAxLabel());
                         ylabel(dAx(r), sprintf('Delay (%s)', ...
                             app.tUnitAx()));
                         
-                        cAx(r) = uiaxes(g);
-                        cAx(r).Layout.Row    = r;
-                        cAx(r).Layout.Column = 2;
-                        cAx(r).Visible = 'off';
+                        cAx(r) = app.newCbarHost(g, r, 2);
                     end
                     dataOut{h} = dAx;
                     cbarOut{h} = cAx;
@@ -16423,12 +22677,11 @@ classdef TRSpecAnalyzer < handle
                     end
                 end
                 
-                % Always render a colorbar in EVERY cbar cell so the
-                % column reservations stay aligned across the three
-                % map panels.  When showCbar is false, or for the
-                % lower split rows of a "true colorbar" panel, draw a
-                % fully-transparent placeholder colorbar so the cell
-                % keeps its 50 px width and the data axes stay flush.
+                % Every map has a cell for a colorbar, of the same
+                % width (set by the grid, see buildMapAxes), so that the
+                % three maps are equally wide. The cell holds a bar where
+                % one is shown: for the maps with showCbar, in the top
+                % cell when the map is split.
                 for k = 1:numel(cbarArr)
                     hc = cbarArr(k);
                     cla(hc);
@@ -16436,15 +22689,11 @@ classdef TRSpecAnalyzer < handle
                     if showCbar && k == 1
                         hc.CLim = clim;
                         colormap(hc, cmap);
-                        cb = colorbar(hc);
-                        cb.Label.String = '\DeltaA or Intensity';
+                        cb = app.hostCbar(hc);
+                        cb.Label.String = app.sigName();
+                        app.placeCbar(cb, [4 10] / 75, [0.10 0.84]);
                     else
-                        % Invisible placeholder colorbar to hold the
-                        % column width identically to the visible case.
-                        hc.CLim = clim;
-                        colormap(hc, cmap);
-                        cb = colorbar(hc);
-                        cb.Visible = 'off';
+                        app.hostCbar(hc, false);
                     end
                 end
             end
@@ -16536,7 +22785,7 @@ classdef TRSpecAnalyzer < handle
                 yline(axKinFit, 0, 'k:', 'HandleVisibility', 'off');
                 hold(axKinFit, 'off');  grid(axKinFit, 'on');
                 xlabel(axKinFit, sprintf('Delay time (%s)', app.tUnitAx()));
-                ylabel(axKinFit, '\DeltaA or Intensity');
+                ylabel(axKinFit, app.sigName());
                 legend(axKinFit, 'Location', 'best');
                 title(axKinFit, sprintf(['Kinetics at  %s = %.2f %s   ' ...
                     '(requested %.2f %s)'], app.xSym(), wlActual, app.xUnitAx(), ...
@@ -16549,7 +22798,7 @@ classdef TRSpecAnalyzer < handle
                 yline(axKinRes, 0, 'k:');
                 hold(axKinRes, 'off');  grid(axKinRes, 'on');
                 xlabel(axKinRes, sprintf('Delay time (%s)', app.tUnitAx()));
-                ylabel(axKinRes, 'Residual (\DeltaA or Intensity)');
+                ylabel(axKinRes, ['Residual (' app.sigName() ')']);
                 title(axKinRes, sprintf('Fit residual at %s = %.2f %s', ...
                     app.xSym(), wlActual, app.xUnitAx()));
                 
@@ -17122,14 +23371,12 @@ classdef TRSpecAnalyzer < handle
                     'pure noise has none.']);
             uilabel(ctl, 'Text', '');
 
-            axSAS = uiaxes(rgl);
-            axSAS.Layout.Row = 2;  axSAS.Layout.Column = 1;
-            axPop = uiaxes(rgl);
-            axPop.Layout.Row = 2;  axPop.Layout.Column = 2;
-            axKin = uiaxes(rgl);
-            axKin.Layout.Row = 3;  axKin.Layout.Column = 1;
-            axRes = uiaxes(rgl);
-            axRes.Layout.Row = 3;  axRes.Layout.Column = 2;
+            % (the three plots without a color bar do not leave the room
+            % of the bar of the residual map free)
+            axSAS = app.boxAxes(rgl, [56 14 24 40], 2, 1);
+            axPop = app.boxAxes(rgl, [56 14 24 40], 2, 2);
+            axKin = app.boxAxes(rgl, [56 14 24 40], 3, 1);
+            axRes = app.boxAxes(rgl, [56 74 24 40], 3, 2);
 
             % ---- State ----
             sch = [];      % parsed scheme shown in the tables
@@ -17633,6 +23880,8 @@ classdef TRSpecAnalyzer < handle
                 r.fwhmLo      = info.fwhmLo;
                 r.fwhmAtLimit = info.fwhmAtLimit;
                 r.irfRetry    = info.irfRetry;
+                r.fwhmHi      = info.fwhmHi;
+                r.fwhmTooWide = info.fwhmTooWide;
                 r.t0Fixed    = cbT0fix.Value || strcmp(irfM, 'none');
                 r.fwhmFixed  = cbFWfix.Value || strcmp(irfM, 'none');
                 r.irf        = irfM;
@@ -17787,6 +24036,9 @@ classdef TRSpecAnalyzer < handle
                     if isfield(res, 'fwhmAtLimit') && isequal(res.fwhmAtLimit, true)
                         L{end+1} = sprintf('IRF FWHM = %.4g %s  [not resolved]', ...
                             res.fwhm, u);
+                    elseif isfield(res, 'fwhmTooWide') && isequal(res.fwhmTooWide, true)
+                        L{end+1} = sprintf('IRF FWHM = %.4g %s  [not determined]', ...
+                            res.fwhm, u);
                     else
                         L{end+1} = irfLine('IRF FWHM', res.fwhm, res.fwhmStd, res.fwhmFixed, u);
                     end
@@ -17940,7 +24192,7 @@ classdef TRSpecAnalyzer < handle
                 grid(axSAS, 'on');
                 isDAS = strcmp(ddSpec.Value, 'DAS');
                 if isempty(res)
-                    ylabel(axSAS, 'Amplitude (\DeltaA or Intensity)');
+                    ylabel(axSAS, ['Amplitude (' app.sigName() ')']);
                     title(axSAS, 'Spectra (run fit)');
                     legend(axSAS, 'off');
                     xlim(axSAS, [wlLo, wlHi]);
@@ -18001,7 +24253,7 @@ classdef TRSpecAnalyzer < handle
                 if cbNorm.Value
                     ylabel(axSAS, 'Normalized amplitude');
                 else
-                    ylabel(axSAS, 'Amplitude (\DeltaA or Intensity)');
+                    ylabel(axSAS, ['Amplitude (' app.sigName() ')']);
                 end
                 if isDAS
                     title(axSAS, 'Decay-associated spectra (DAS) of this fit');
@@ -18069,7 +24321,7 @@ classdef TRSpecAnalyzer < handle
                 hold(axKin, 'off');
                 grid(axKin, 'on');
                 xlabel(axKin, sprintf('Delay time (%s)', app.tUnitAx()));
-                ylabel(axKin, '\DeltaA or Intensity');
+                ylabel(axKin, app.sigName());
                 title(axKin, sprintf('Kinetics at %s = %.4g %s', ...
                     app.xSym(), app.wavelength(iw), app.xUnitAx()));
                 applyTimeAxis(axKin);
@@ -18096,7 +24348,7 @@ classdef TRSpecAnalyzer < handle
 
             function plotRes()
                 app.claAll(axRes);
-                colorbar(axRes, 'off');
+                app.boxCbar(axRes, false);
                 xlabel(axRes, sprintf('Delay time (%s)', app.tUnitAx()));
                 ylabel(axRes, app.xAxLabel());
                 if isempty(res)
@@ -18126,8 +24378,8 @@ classdef TRSpecAnalyzer < handle
                 hold(axRes, 'off');
                 title(axRes, sprintf('Residual (data - fit),  RMS = %.3g', ...
                     res.rms));
-                cb = colorbar(axRes);
-                cb.Label.String = '\DeltaA or Intensity';
+                cb = app.boxCbar(axRes);
+                cb.Label.String = app.sigName();
             end
 
             function h = wlMarker(ax, isY)
@@ -18466,7 +24718,9 @@ classdef TRSpecAnalyzer < handle
                 gs = uigridlayout(svdFig, [1, 3]);
                 gs.ColumnWidth = {'0.8x', '1x', '1x'};
                 gs.Padding = [10 10 10 10];  gs.ColumnSpacing = 10;
-                a1 = uiaxes(gs);  a2 = uiaxes(gs);  a3 = uiaxes(gs);
+                a1 = app.boxAxes(gs, [56 14 24 40]);
+                a2 = app.boxAxes(gs, [56 14 24 40]);
+                a3 = app.boxAxes(gs, [56 14 24 40]);
                 cols = lines(3);
 
                 nSv = min(20, numel(sv));
@@ -18700,7 +24954,7 @@ classdef TRSpecAnalyzer < handle
             left.Layout.Column = 1;
             lgl = uigridlayout(left, [18, 1]);
             lgl.RowHeight = {22, 24, 24, 28, 24, 24, 22, 30, 30, 24, 36, 22, ...
-                             30, 32, 32, 32, 22, '1x'};
+                             30, 32, 32, 32, 36, '1x'};
             lgl.Padding = [8 8 8 8];  lgl.RowSpacing = 6;
 
             uilabel(lgl, 'Text', '1. Corrections to propose', ...
@@ -18824,8 +25078,10 @@ classdef TRSpecAnalyzer < handle
                     'is discarded. Press "Run Fit" there.']);
             btnSave = uibutton(lgl, 'Enable', 'off', ...
                 'Text', 'Save report...');
+            % (two lines: the line after a run can name steps that were
+            % not determined)
             lblStatus = uilabel(lgl, 'Text', 'Ready.', ...
-                'FontColor', [0.2 0.2 0.2]);
+                'FontColor', [0.2 0.2 0.2], 'WordWrap', 'on');
             uitextarea(lgl, 'Editable', 'off', 'Value', { ...
                 'Run analyses the data as they are shown in the main window and changes nothing.', ...
                 '', ...
@@ -18856,10 +25112,10 @@ classdef TRSpecAnalyzer < handle
             gC = uigridlayout(tabCor, [2, 2]);
             gC.RowHeight = {'1.3x', '1x'};  gC.ColumnWidth = {'1x', '1x'};
             gC.Padding = [8 8 8 8];  gC.RowSpacing = 8;  gC.ColumnSpacing = 10;
-            axRaw = uiaxes(gC);  axRaw.Layout.Row = 1;  axRaw.Layout.Column = 1;
-            axCor = uiaxes(gC);  axCor.Layout.Row = 1;  axCor.Layout.Column = 2;
-            axBg  = uiaxes(gC);  axBg.Layout.Row  = 2;  axBg.Layout.Column  = 1;
-            axNz  = uiaxes(gC);  axNz.Layout.Row  = 2;  axNz.Layout.Column  = 2;
+            axRaw = app.boxAxes(gC, [56 74 24 40], 1, 1);
+            axCor = app.boxAxes(gC, [56 74 24 40], 1, 2);
+            axBg  = app.boxAxes(gC, [56 74 24 40], 2, 1);
+            axNz  = app.boxAxes(gC, [56 74 24 40], 2, 2);
 
             tabCmp = uitab(tabs, 'Title', 'Components');
             gM = uigridlayout(tabCmp, [2, 2]);
@@ -18870,8 +25126,8 @@ classdef TRSpecAnalyzer < handle
             gTL.Layout.Row = 1;  gTL.Layout.Column = 1;
             gTL.ColumnWidth = {'1x', '1x'};
             gTL.Padding = [0 0 0 0];  gTL.ColumnSpacing = 8;
-            axSV  = uiaxes(gTL);  axSV.Layout.Row  = 1;  axSV.Layout.Column  = 1;
-            axRms = uiaxes(gTL);  axRms.Layout.Row = 1;  axRms.Layout.Column = 2;
+            axSV  = app.boxAxes(gTL, [56 14 34 40], 1, 1);
+            axRms = app.boxAxes(gTL, [56 14 34 40], 1, 2);
             % top right: kinetics at a few wavelengths, data and fit.
             % Two axes share the delay axis: the delays around time
             % zero on a linear scale, the later ones on a log scale.
@@ -18893,22 +25149,38 @@ classdef TRSpecAnalyzer < handle
             % what the plot shows, or why it is empty (the two axes carry
             % no title: equal decorations keep their ordinates aligned)
             lblKin = uilabel(gKc, 'Text', '', 'FontColor', [0.35 0.35 0.35]);
-            gKa = uigridlayout(gKin, [1, 2]);
-            gKa.ColumnWidth = {'1x', '1.5x'};
-            gKa.Padding = [0 0 0 0];  gKa.ColumnSpacing = 2;
-            axKinL = uiaxes(gKa);  axKinL.Layout.Row = 1;  axKinL.Layout.Column = 1;
-            axKinR = uiaxes(gKa);  axKinR.Layout.Row = 1;  axKinR.Layout.Column = 2;
+            % The legend stands right of the plot box (drawKinetics).
+            % A panel shows nothing outside itself, so the room of the
+            % legend belongs to the panel of the axes that carries it:
+            % 120 pixels right of the box (the legend begins 10 pixels
+            % from the box and is about 100 pixels wide for positions
+            % of four digits).
+            % The linear and the logarithmic part are 1 : 1.5 wide. The
+            % grid shares its width as '1x' and '1.5x' beside a third
+            % column of 25 pixels, which the panel of the logarithmic
+            % part takes too: with 64 pixels of room in the first panel
+            % and 121 in the second, the boxes are x - 64 and
+            % 1.5 x + 25 - 121 = 1.5 (x - 64) pixels wide.
+            % Right of the linear box 8 pixels stay free: the label of
+            % a tick at its right end reaches over the edge and would
+            % be cut off by the panel beside it.
+            gKa = uigridlayout(gKin, [1, 3]);
+            gKa.ColumnWidth = {'1x', '1.5x', 25};
+            gKa.Padding = [0 0 0 0];  gKa.ColumnSpacing = 0;
+            axKinL = app.boxAxes(gKa, [56 8 6 40], 1, 1);
+            axKinR = app.boxAxes(gKa, [1 120 6 40], 1, [2 3]);
             % bottom: spectra
-            axDADS = uiaxes(gM);  axDADS.Layout.Row = 2;  axDADS.Layout.Column = 1;
-            axEADS = uiaxes(gM);  axEADS.Layout.Row = 2;  axEADS.Layout.Column = 2;
+            axDADS = app.boxAxes(gM, [56 14 24 40], 2, 1);
+            axEADS = app.boxAxes(gM, [56 14 24 40], 2, 2);
 
             tabRes = uitab(tabs, 'Title', 'Residual');
             gS = uigridlayout(tabRes, [2, 2]);
             gS.RowHeight = {'1x', '1x'};  gS.ColumnWidth = {'1x', '1x'};
             gS.Padding = [8 8 8 8];  gS.RowSpacing = 8;  gS.ColumnSpacing = 10;
-            axRes  = uiaxes(gS);  axRes.Layout.Row  = [1 2];  axRes.Layout.Column  = 1;
-            axPow  = uiaxes(gS);  axPow.Layout.Row  = 1;      axPow.Layout.Column  = 2;
-            axProf = uiaxes(gS);  axProf.Layout.Row = 2;      axProf.Layout.Column = 2;
+            axRes  = app.boxAxes(gS, [56 74 24 40], [1 2], 1);
+            % (the two plots beside the map have no color bar)
+            axPow  = app.boxAxes(gS, [56 14 24 40], 1, 2);
+            axProf = app.boxAxes(gS, [56 14 24 40], 2, 2);
 
             % ---- State ----
             P = [];  S = [];          % results of the last run
@@ -18974,7 +25246,7 @@ classdef TRSpecAnalyzer < handle
                 for q = 1:numel(axs)
                     app.claAll(axs{q});
                     legend(axs{q}, 'off');
-                    colorbar(axs{q}, 'off');
+                    app.boxCbar(axs{q}, false);
                     title(axs{q}, 'Press "Run"');
                 end
                 drawKinetics();      % empty, with its own message
@@ -19049,11 +25321,7 @@ classdef TRSpecAnalyzer < handle
                 btnGA.Enable    = app.pick(~isempty(S), 'on', 'off');
                 btnSave.Enable  = 'on';
                 tabs.SelectedTab = tabRep;
-                if P.changed
-                    lblStatus.Text = 'Done. The data are unchanged so far.';
-                else
-                    lblStatus.Text = 'Done. No correction was needed.';
-                end
+                lblStatus.Text = app.autoDoneText(P);
                 keepState();
             end
 
@@ -19127,10 +25395,8 @@ classdef TRSpecAnalyzer < handle
                     btnSave.Enable  = 'on';
                     if applied
                         msg = 'Corrections applied to the main data.';
-                    elseif P.changed
-                        msg = 'Done. The data are unchanged so far.';
                     else
-                        msg = 'Done. No correction was needed.';
+                        msg = app.autoDoneText(P);
                     end
                     lblStatus.Text = sprintf('%s  [restored]', msg);
                 catch
@@ -19257,6 +25523,14 @@ classdef TRSpecAnalyzer < handle
 
             function doApply()
                 if isempty(P) || applied, return; end
+                if app.aniOn && strcmp(app.aniView, 'r')
+                    uialert(f, ['The corrections cannot be applied while ' ...
+                        'the main window shows the anisotropy r. Choose ' ...
+                        'the view "Parallel" or "Magic angle", run again ' ...
+                        'and apply there: both polarizations are then ' ...
+                        'corrected alike.'], 'Anisotropy view');
+                    return;
+                end
                 if ~P.changed
                     uialert(f, 'The report proposes no correction.', ...
                         'Nothing to apply', 'Icon', 'info');
@@ -19294,6 +25568,7 @@ classdef TRSpecAnalyzer < handle
                     % which makes them the new baseline and resets the
                     % correction state, selection and display ranges.
                     app.deltaA = P.Dfull;
+                    app.pendingAuto = app.autoLogEntry(P);
                     app.applyCropByRange(min(P.wl), max(P.wl), ...
                         tK(1), tK(end));
                     if P.chirp.shift ~= 0
@@ -19417,7 +25692,7 @@ classdef TRSpecAnalyzer < handle
                 if isempty(cl) || ~isfinite(cl) || cl == 0, cl = 1; end
                 ax.CLim = [-cl cl];
                 colormap(ax, app.getColormap());
-                colorbar(ax);
+                app.boxCbar(ax);
                 ax.XLim = [min(wlv), max(wlv)];
                 if tv(end) > tv(1), ax.YLim = [tv(1), tv(end)]; end
                 ax.NextPlot = 'add';
@@ -19496,7 +25771,7 @@ classdef TRSpecAnalyzer < handle
                 yline(axBg, 0, 'k:', 'HandleVisibility', 'off');
                 grid(axBg, 'on');
                 xlabel(axBg, app.xAxLabel());
-                ylabel(axBg, '\DeltaA or Intensity');
+                ylabel(axBg, app.sigName());
 
                 % ---- noise of every channel ----
                 app.claAll(axNz);
@@ -19713,7 +25988,8 @@ classdef TRSpecAnalyzer < handle
                 axKinR.YTickLabelMode = 'auto';
                 axKinR.XTickMode = 'auto';  axKinR.XTickLabelMode = 'auto';
                 if isempty(S)
-                    gKa.ColumnWidth = {'1x', 0};
+                    gKa.ColumnWidth = {'1x', 0, 0};
+                    app.fitBox(axKinL, [56 120 6 40]);
                     axKinR.Visible = 'off';  axKinL.Visible = 'on';
                     if isempty(P)
                         lblKin.Text = 'Press "Run"';
@@ -19749,15 +26025,21 @@ classdef TRSpecAnalyzer < handle
                 switch kMode
                     case 'split'
                         iL = 1:jS;  iR = jS:n;
-                        gKa.ColumnWidth = {'1x', '1.5x'};
+                        gKa.ColumnWidth = {'1x', '1.5x', 25};
+                        % (9 pixels between the two halves; the room
+                        % of the legend right of the second one)
+                        app.fitBox(axKinL, [56 8 6 40]);
+                        app.fitBox(axKinR, [1 120 6 40]);
                         axKinL.Visible = 'on';  axKinR.Visible = 'on';
                     case 'log'
                         iL = zeros(1, 0);  iR = 1:n;
-                        gKa.ColumnWidth = {0, '1x'};
+                        gKa.ColumnWidth = {0, '1x', 0};
+                        app.fitBox(axKinR, [56 120 6 40]);
                         axKinL.Visible = 'off';  axKinR.Visible = 'on';
                     otherwise
                         iL = 1:n;  iR = zeros(1, 0);
-                        gKa.ColumnWidth = {'1x', 0};
+                        gKa.ColumnWidth = {'1x', 0, 0};
+                        app.fitBox(axKinL, [56 120 6 40]);
                         axKinL.Visible = 'on';  axKinR.Visible = 'off';
                 end
                 if isempty(iR), axT = axKinL; else, axT = axKinR; end
@@ -19803,7 +26085,7 @@ classdef TRSpecAnalyzer < handle
                     end
                     grid(axKinL, 'on');
                     xlabel(axKinL, tLab);
-                    ylabel(axKinL, '\DeltaA or Intensity');
+                    ylabel(axKinL, app.sigName());
                 end
                 if ~isempty(iR)
                     axKinR.XScale = 'log';
@@ -19821,7 +26103,7 @@ classdef TRSpecAnalyzer < handle
                     grid(axKinR, 'on');
                     if isempty(iL)
                         xlabel(axKinR, tLab);
-                        ylabel(axKinR, '\DeltaA or Intensity');
+                        ylabel(axKinR, app.sigName());
                     else
                         % same ordinate as the left axes: no labels twice
                         axKinR.YTickLabel = {};
@@ -19833,7 +26115,11 @@ classdef TRSpecAnalyzer < handle
                 % follows the axes when the layout changes ('best' is
                 % worked out once, for the size the axes has at that
                 % moment, and ended up beyond the edge of the tab).
+                % The room right of the box is kept free for it (120
+                % pixels, see where the axes are made). The box is put
+                % in place again, in case the new legend has moved it.
                 legend(axT, hK, 'Location', 'northeastoutside');
+                app.fitBox(axT);
                 lblKin.Text = ['dots: data,  lines: ' fitName()];
             end
 
@@ -19842,7 +26128,7 @@ classdef TRSpecAnalyzer < handle
                 app.claAll(axProf);  legend(axProf, 'off');
                 if isempty(S)
                     app.claAll(axRes);
-                    colorbar(axRes, 'off');
+                    app.boxCbar(axRes, false);
                     title(axRes, 'No summary');
                     title(axPow, 'No summary');
                     title(axProf, 'No summary');

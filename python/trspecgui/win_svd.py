@@ -82,7 +82,8 @@ class SvdWindow(ChildWindow):
                 cax = cv.figure.add_axes([0.9, 0.15, 0.02, 0.75])
                 cv.layoutFcn = lambda: mapLayout(cv, ax, cax, T=20.0, R=58.0)
             else:
-                cv.layoutFcn = lambda: self._lay(cv, ax, 10.0)
+                # (the room of the color bar of the maps below)
+                cv.layoutFcn = lambda: self._lay(cv, ax, 10.0, 58.0)
             return cv, ax, cax
 
         self.cvU, self.axU, _ = sub(
@@ -126,9 +127,9 @@ class SvdWindow(ChildWindow):
         self.refreshAll()
 
     @staticmethod
-    def _lay(cv, ax, top):
+    def _lay(cv, ax, top, right=16.0):
         W, H = cv.sizePt()
-        cv.place(ax, 52.0, 32.0, W - 52.0 - 16.0, H - 32.0 - top)
+        cv.place(ax, 52.0, 32.0, W - 52.0 - right, H - 32.0 - top)
 
     def nKeep(self):
         return min(self.edN.intValue(), self.nMax)
@@ -152,9 +153,11 @@ class SvdWindow(ChildWindow):
         ax.semilogy(np.arange(1, nShow + 1), sigma[:nShow], 'o',
                     color=(0.20, 0.45, 0.80), markersize=6)
         ax.axvline(nKeep + 0.5, color='r', linestyle='--', linewidth=1.0)
+        # (clipped: in a zoomed view that does not hold the line, the
+        # text would lie on the numbers of the y-axis)
         ax.text(nKeep + 0.5, 0.97, ' N=%d' % nKeep, color='r',
                 transform=ax.get_xaxis_transform(), ha='left', va='top',
-                fontsize=FONT_PT)
+                fontsize=FONT_PT, clip_on=True)
         ax.set_xlabel('Component index')
         ax.set_ylabel('$\\sigma_i$')
         self.cvSig.draw_idle()

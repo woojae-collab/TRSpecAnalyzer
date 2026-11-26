@@ -5,6 +5,7 @@ Port of fitParamUncertainty of TRSpecAnalyzer.m.
 import numpy as np
 
 
+@np.errstate(over='ignore')
 def fit_param_uncertainty(res_fun, p, rss, n_data):
     """sqrt(diag(s^2 inv(J'J))) with s^2 = rss / (n_data - M).
 

@@ -78,6 +78,15 @@ and averaged.
   check, outlier detection and time-shift alignment
 - Background subtraction, time-zero shift, chirp correction, cropping, and
   masking of wavelength ranges (for example pump scatter)
+- Subtraction of a measurement of the solvent or substrate alone, with
+  scale and time shift typed or estimated
+- Anisotropy from measurements with parallel and perpendicular
+  polarization: parallel, perpendicular, magic-angle and r(λ, t) views,
+  each of which can be analyzed and keeps its own results; G typed or
+  from tail matching, with a plot of G along the spectrum as a check; a
+  time shift of the perpendicular data, typed or estimated, for
+  measurements whose time zero differs
+- Conversion ΔA ↔ ΔT/T for transient absorption
 - Time unit fs / ps / ns / us; spectral axis in nm or cm-1
 - Sessions: the whole working state, including every result, is saved to
   and restored from one file (`.mat` in the MATLAB version, `.trsession`
@@ -86,7 +95,8 @@ and averaged.
 **Analysis**
 
 - Single-wavelength fit: sum of exponentials (optionally stretched)
-  convolved with a Gaussian IRF
+  convolved with a Gaussian IRF; also for a band of wavelengths (its
+  integral over the spectral axis, or its mean)
 - SVD
 - Global Analysis: DADS and EADS, with 1-sigma uncertainties of the fitted
   parameters and optional coherent-artifact terms at time zero
@@ -97,7 +107,16 @@ and averaged.
   determine are flagged
 - Lifetime Density Analysis (LDA)
 - MCR-ALS
-- Coherence analysis of the residual oscillations and time-frequency maps
+- Coherence analysis of the residual oscillations and time-frequency maps;
+  the vibrational coherence of the solvent, measured alone, can be
+  subtracted first, with the maps before and after side by side; the
+  main window then offers views of the data without the solvent
+  oscillation or without the whole solvent signal (for a 2D map
+  without the solvent)
+- Band position: where a band lies at every delay (spectral shift,
+  dynamic Stokes shift), by its first moment, by a parabola through its
+  top or by a log-normal fit; the position is fitted with a sum of
+  exponentials and shown as C(t)
 - Auto Analysis: proposes the corrections and the number of components and
   writes a report that lists every decision with the numbers behind it
 
@@ -112,7 +131,7 @@ Corrected data and analysis results can be exported as CSV files.
 
 ## Demo data
 
-The [`demo`](demo) folder holds three synthetic data sets with known
+The [`demo`](demo) folder holds six synthetic data sets with known
 answers, the true spectra and populations they were made from, and the
 script that generated them (`make_demo_data.m`). Nothing in it is a
 measurement.
@@ -122,6 +141,12 @@ measurement.
 | `demo_TA.csv` (+ `scans/`) | A -> B -> C -> ground state, with chirp, background, pump scatter and oscillations | the full walkthrough, Load & Average, Auto Analysis |
 | `demo_target.csv` | A -> B and A -> C in parallel, B -> ground state, C -> ground state | Target Analysis of a model that a sequential fit cannot describe |
 | `demo_equilibrium.csv` | A <-> B, B -> C -> ground state | Target Analysis with a step that runs in both directions |
+| `demo_solution.csv` + `demo_solvent.csv` | a solute in cyclohexane and cyclohexane alone, 20 fs pulses: solvent oscillations and a coherent artifact | removing the solvent coherence in the Coherence window, the solvent views of the main window, `Subtract data...` |
+| `demo_solution_raw.csv` + `demo_solvent_raw.csv` | the same pair as measured: background and chirp | correcting the solution data and letting the solvent data follow |
+| `demo_aniso_par.csv` + `demo_aniso_perp.csv` | one sample measured with parallel and perpendicular polarization, rotation in 50 ps | `Anisotropy...`: G from tail matching, r(t), magic-angle data |
+| `demo_aniso_raw_par.csv` + `demo_aniso_raw_perp.csv` | the same pair as measured: background, pump scatter and chirp | correcting the parallel data and letting the perpendicular data follow |
+| `demo_aniso_raw_perp_late.csv` | the perpendicular measurement once more, its time zero 0.05 ps late | `Anisotropy...`: `Estimate` finds the time shift, −0.050 ps |
+| `demo_solvation.csv` | time-resolved emission of a dye whose band shifts to the red while the solvent relaxes (dynamic Stokes shift); one decay of 4 ns | loading intensity data, `Fit trace...` on a band against one wavelength, `Band position...`: the shift itself, with its three times |
 
 `demo/README_demo.txt` gives the steps and the numbers to expect at each
 one, so the program can be checked on your own installation.
@@ -131,8 +156,8 @@ one, so the program can be checked on your own installation.
 The version number (major.minor.patch) is shown in the title of the main
 window and returned by `TRSpecAnalyzer.Version`. It is also written into
 saved sessions and Auto Analysis reports. Changes are listed in
-[CHANGELOG.md](CHANGELOG.md), and every version stays available under
-[Releases](https://github.com/woojae-collab/TRSpecAnalyzer/releases).
+[CHANGELOG.md](CHANGELOG.md), and the released versions stay available
+under [Releases](https://github.com/woojae-collab/TRSpecAnalyzer/releases).
 The Python version carries the number of the MATLAB version whose
 functions it has. When you report results, please state the version you
 used.
@@ -153,6 +178,11 @@ MATLAB 없이 쓸 수 있는 Python판도 `python` 폴더에 있습니다. 기�
 Questions and bug reports are welcome under *Issues*. For a bug report,
 the text of the error dialog and, if possible, a small data file that
 reproduces the problem help most.
+
+## References
+
+The methods of the program are established ones. The publications they
+rest on are listed, part by part, in [REFERENCES.md](REFERENCES.md).
 
 ## How to cite
 
